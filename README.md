@@ -97,6 +97,8 @@ continues) → wait for the face detection → label every face card (same keys 
 **1–9** a person, **O** someone else, **N** not a face; *View* shows the card on the video) →
 set the mask style → **Render** → play or download the result and check the safety report.
 Chrome and Edge play the H.265 result in the page; other browsers may only download it.
+The web app is in English and Russian: it follows the browser's language, and the switch in
+the top bar changes it (remembered per browser).
 
 **API** (for scripts or a native app): every request needs `Authorization: Bearer <token>`;
 interactive documentation at `http://<address>:8765/docs` (*Authorize* with the token).
