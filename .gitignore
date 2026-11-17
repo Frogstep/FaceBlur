@@ -1,0 +1,11 @@
+.venv/
+models/
+work/
+*.mp4
+!tests/**/*.mp4
+__pycache__/
+*.pyc
+out/
+*.faceblur.json
+tools/
+dist/
