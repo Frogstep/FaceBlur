@@ -24,7 +24,7 @@ INSTALL = ROOT / "install"
 PLATFORMS = {"windows": "windows", "linux": "x86_64-manylinux_2_34"}  # uv --python-platform
 ONNXRUNTIME = {"gpu": "onnxruntime-gpu==1.32.0", "cpu": "onnxruntime==1.32.0"}
 LOCKS = [f"install/requirements-{p}-{v}.txt" for p in PLATFORMS for v in ONNXRUNTIME]
-SCRIPTS = ["install.bat", "FaceBlur.bat", "install.sh", "FaceBlur.sh"]
+SCRIPTS = ["install.bat", "FaceBlur.bat", "FaceBlurServer.bat", "install.sh", "FaceBlur.sh"]
 FILES = SCRIPTS + ["README.md"] + LOCKS
 
 

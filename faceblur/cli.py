@@ -6,6 +6,7 @@
                                                 mask the person on cards 1 and 3
   python -m faceblur render --project P.faceblur.json   render a project saved from the app
   python -m faceblur check  MASKED --video SRC  safety pass on an already rendered file
+  python -m faceblur serve  [--port 8765]       HTTP API for other devices (e.g. a phone app)
 """
 
 from __future__ import annotations
@@ -236,6 +237,18 @@ def cmd_check(args) -> int:
     return _check(Path(args.masked).resolve(), refs, wd)
 
 
+def cmd_serve(args) -> int:
+    try:
+        from .server.app import serve
+    except ImportError as e:
+        print(f"the server needs FastAPI and uvicorn ({e.name} is missing): run the installer again, or\n"
+              f"  pip install fastapi uvicorn python-multipart")
+        return 1
+    root = Path(__file__).resolve().parent.parent
+    return serve(args.host, args.port, Path(args.jobs_dir or root / "jobs"),
+                 Path(args.token_file or root / "server_token.txt"), args.keep_days, args.max_upload_gb)
+
+
 def cmd_gui(args) -> int:
     from .gui.app import run
 
@@ -284,6 +297,17 @@ def main(argv=None) -> int:
     c.add_argument("masked")
     c.add_argument("--video", required=True, help="the original video (to find the target)")
     c.set_defaults(fn=cmd_check)
+
+    sv = sub.add_parser("serve", parents=[common], help="HTTP API for other devices (e.g. a phone app)")
+    sv.add_argument("--host", default="0.0.0.0",
+                    help="address to listen on (default 0.0.0.0 = all; 127.0.0.1 = this PC only)")
+    sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--jobs-dir", help="where uploads and results are kept (default jobs/)")
+    sv.add_argument("--token-file", help="access token file, created on first start (default server_token.txt)")
+    sv.add_argument("--keep-days", type=float, default=7.0,
+                    help="delete jobs untouched for this many days (0 = never; default 7)")
+    sv.add_argument("--max-upload-gb", type=float, default=8.0, help="largest accepted video (default 8 GB)")
+    sv.set_defaults(fn=cmd_serve)
 
     args = ap.parse_args(argv)
     if getattr(args, "device", None):

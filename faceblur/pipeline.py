@@ -8,6 +8,7 @@ Long operations take progress(stage, done, total) and cancel() -> bool hooks.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,13 +28,16 @@ Cancel = Callable[[], bool]
 __all__ = ["Analysis", "Cancelled", "RenderResult", "render", "safety_check", "get_analyzer", "workdir"]
 
 
-def workdir(video: str | Path) -> Path:
-    d = ROOT / "work" / Path(video).stem
+def workdir(video: str | Path, root: str | Path | None = None) -> Path:
+    """Cache folder for a video: work/<video name>/ by default, or `root` itself
+    when given (the web server keeps one folder per uploaded video)."""
+    d = Path(root) if root is not None else ROOT / "work" / Path(video).stem
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 _ANALYZER: dict = {}  # loaded once per device (they take a few seconds)
+_MODEL_LOCK = threading.Lock()  # the web server may ask from several threads
 
 
 def get_analyzer():
@@ -42,10 +46,11 @@ def get_analyzer():
 
     device.check_forced_gpu()
     key = device.faces_on_gpu()
-    if key not in _ANALYZER:
-        _ANALYZER.clear()
-        _ANALYZER[key] = FaceAnalyzer()
-    return _ANALYZER[key]
+    with _MODEL_LOCK:
+        if key not in _ANALYZER:
+            _ANALYZER.clear()
+            _ANALYZER[key] = FaceAnalyzer()
+        return _ANALYZER[key]
 
 
 _PREDICTOR: dict = {}  # SAM 2 is loaded once per device (up to 1 GB of weights)
@@ -57,10 +62,11 @@ def get_predictor():
 
     device.check_forced_gpu()
     key = device.sam_device()
-    if key not in _PREDICTOR:
-        _PREDICTOR.clear()
-        _PREDICTOR[key] = load_predictor(key)
-    return _PREDICTOR[key]
+    with _MODEL_LOCK:
+        if key not in _PREDICTOR:
+            _PREDICTOR.clear()
+            _PREDICTOR[key] = load_predictor(key)
+        return _PREDICTOR[key]
 
 
 def _iou(a, b) -> float:
@@ -84,20 +90,23 @@ class Analysis:
     """Everything known about a video after the face scan: detections and the
     face cards the user labels."""
 
-    def __init__(self, video: Path, info: VideoInfo, dets: Detections):
+    def __init__(self, video: Path, info: VideoInfo, dets: Detections, wd: Path | None = None):
         self.video = video
         self.info = info
         self.dets = dets
-        self.wd = workdir(video)
+        self.wd = workdir(video, wd)
         self.cards: list[Card] = build_cards(dets)
         self.card_of_det = card_of_detection(dets, self.cards)
         self._frame_index = dets.by_frame()
 
     @classmethod
-    def open(cls, video: str | Path, progress: Progress | None = None, cancel: Cancel | None = None) -> "Analysis":
+    def open(cls, video: str | Path, progress: Progress | None = None, cancel: Cancel | None = None,
+             wd: str | Path | None = None) -> "Analysis":
+        """wd: cache folder (default work/<video name>/, see workdir)."""
         video = Path(video).resolve()
         info = probe(video)
-        cache = workdir(video) / "detections.npz"
+        wd = workdir(video, wd)
+        cache = wd / "detections.npz"
         if cache.exists():
             dets = Detections.load(cache)
         else:
@@ -106,7 +115,7 @@ class Analysis:
             analyzer = get_analyzer()
             cb = (lambda d, t: progress("Detecting faces", d, t)) if progress else None
             dets = scan(info, analyzer, cache, progress=cb, cancel=cancel)
-        return cls(video, info, dets)
+        return cls(video, info, dets, wd)
 
     def detections_in(self, frame: int) -> np.ndarray:
         if 0 <= frame < len(self._frame_index):
