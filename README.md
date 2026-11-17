@@ -112,6 +112,11 @@ resumable upload (`POST /api/v1/uploads`, then `PATCH /api/v1/jobs/{id}/upload` 
 Each upload gets its own folder in `jobs/` holding an ordinary project file, so a job can also
 be opened in the desktop app (`faceblur gui jobs/<id>/project.faceblur.json`). Jobs untouched
 for 7 days are deleted (`--keep-days`). The GPU runs one job at a time; others queue.
+A deleted job (by you or by that cleanup) is not lost: its source video, result, project file,
+`job.json` (with when and why it was deleted), render log and safety report move to
+`history/<date>_<name>_<id>/` next to the jobs folder, for debugging. The history is never
+cleaned up automatically; delete old folders by hand. `--history-dir` puts it elsewhere,
+`--no-history` deletes jobs completely. Uploads that never completed are not kept.
 Keep the server on your home network or a VPN such as Tailscale: it has no HTTPS of its own.
 Deleting `server_token.txt` (and restarting) makes a new token and signs every browser out.
 

@@ -389,3 +389,93 @@ def test_result_inline_for_video_player(env, sample_video):
     assert r.headers["content-disposition"].startswith("inline")
     r = client.get(f"{API}/jobs/{jid}/result", headers=H)
     assert r.headers["content-disposition"].startswith("attachment")
+
+
+# ---------------------------------------------------------------- history
+
+@pytest.fixture
+def env_history(tmp_path):
+    store = JobStore(tmp_path / "jobs", history=tmp_path / "history")
+    app = create_app(store, Worker(store, FakeOps()), TOKEN, max_upload=50 << 20)
+    with TestClient(app) as client:
+        yield client, store, tmp_path / "history"
+
+
+def rendered_job(client, video) -> str:
+    jid = upload(client, video)
+    wait(client, jid, "review")
+    client.put(f"{API}/jobs/{jid}/people", json=[{"name": "A"}], headers=H)
+    client.put(f"{API}/jobs/{jid}/labels", json={"labels": {"1": 0}, "rest": "other"}, headers=H)
+    client.post(f"{API}/jobs/{jid}/render", headers=H)
+    wait(client, jid, "done")
+    return jid
+
+
+def test_deleted_job_moves_to_history(env_history, sample_video):
+    client, store, history = env_history
+    jid = rendered_job(client, sample_video)
+    assert client.delete(f"{API}/jobs/{jid}", headers=H).status_code == 204
+    assert not (store.root / jid).exists()
+    [kept] = list(history.iterdir())
+    assert kept.name.endswith(f"_VID_1_{jid[:8]}")
+    files = sorted(str(p.relative_to(kept)).replace("\\", "/") for p in kept.rglob("*") if p.is_file())
+    assert files == ["job.json", "project.faceblur.json", "result.mp4", "source.mp4", "work/safety_report.json"]
+    assert (kept / "source.mp4").read_bytes() == sample_video.read_bytes()
+    record = json.loads((kept / "job.json").read_text(encoding="utf-8"))
+    assert record["name"] == "VID_1.mp4" and record["deleted_reason"] == "deleted by the user"
+    # the kept project still points at the kept video
+    from faceblur.project import Project
+
+    assert Path(Project.load(kept / "project.faceblur.json").video) == (kept / "source.mp4").resolve()
+
+
+def test_failed_uploads_are_not_kept(env_history):
+    client, store, history = env_history
+    r = client.post(f"{API}/jobs", params={"name": "x.mp4"}, content=b"not a video" * 100, headers=H)
+    assert r.status_code == 415
+    jid = client.post(f"{API}/uploads", json={"name": "half.mp4", "size": 1000}, headers=H).json()["id"]
+    client.patch(f"{API}/jobs/{jid}/upload", content=b"z" * 400, headers={**H, "Upload-Offset": "0"})
+    assert client.delete(f"{API}/jobs/{jid}", headers=H).status_code == 204
+    assert not history.exists() or not any(history.iterdir())
+
+
+def test_cleanup_moves_old_jobs_to_history(env_history, sample_video):
+    client, store, history = env_history
+    jid = rendered_job(client, sample_video)
+    job = store.get(jid)
+    job.state.updated = time.time() - 30 * 86400
+    job.save()
+    assert store.cleanup() == 1
+    [kept] = list(history.iterdir())
+    assert json.loads((kept / "job.json").read_text(encoding="utf-8"))["deleted_reason"] == "not changed for 7 days"
+
+
+def test_job_survives_when_history_cannot_be_written(env_history, sample_video):
+    client, store, history = env_history
+    jid = rendered_job(client, sample_video)
+    history.write_text("in the way")  # a file where the history folder should be
+    r = client.delete(f"{API}/jobs/{jid}", headers=H)
+    assert r.status_code == 500 and "nothing was deleted" in r.json()["detail"]
+    job = store.get(jid)
+    assert job is not None and job.video.is_file() and job.result.is_file()
+    assert client.get(f"{API}/jobs/{jid}", headers=H).json()["status"] == "done"
+
+
+def test_history_move_failing_halfway_puts_files_back(env_history, sample_video, monkeypatch):
+    client, store, history = env_history
+    jid = rendered_job(client, sample_video)
+    import faceblur.server.jobs as jobs_mod
+
+    real_move = jobs_mod.shutil.move
+
+    def flaky(src, dst):
+        if Path(src).name == "result.mp4" and "history" in str(dst):
+            raise OSError("disk full")
+        return real_move(src, dst)
+
+    monkeypatch.setattr(jobs_mod.shutil, "move", flaky)
+    assert client.delete(f"{API}/jobs/{jid}", headers=H).status_code == 500
+    job = store.get(jid)
+    assert job.video.read_bytes() == sample_video.read_bytes()  # moved first, then put back
+    assert job.result.is_file() and (job.dir / "job.json").is_file()
+    assert not any(history.iterdir())

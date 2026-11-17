@@ -12,3 +12,4 @@ dist/
 .idea/
 jobs/
 server_token.txt
+history/

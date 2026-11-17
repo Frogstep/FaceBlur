@@ -25,6 +25,7 @@ import hmac
 import logging
 import secrets
 import shutil
+import sys
 import threading
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -298,7 +299,7 @@ def create_app(store: JobStore, worker: Worker, token: str, max_upload: int = 8 
             if info.num_frames <= 0:
                 raise HTTPException(415, "the video has no frames")
         except BaseException:
-            store.delete(job)
+            store.delete(job, archive=False)  # never a complete video
             raise
         job.update(video={"width": info.width, "height": info.height, "fps": round(info.fps_float, 3),
                           "frames": info.num_frames, "duration": round(info.duration, 3),
@@ -413,7 +414,7 @@ def create_app(store: JobStore, worker: Worker, token: str, max_upload: int = 8 
             if size == 0:
                 raise HTTPException(422, "empty upload")
         except BaseException as e:
-            store.delete(job)
+            store.delete(job, archive=False)  # upload failed
             if isinstance(e, ClientDisconnect):
                 log.info("upload %s aborted by the client", job.state.id)
             raise
@@ -458,7 +459,8 @@ def create_app(store: JobStore, worker: Worker, token: str, max_upload: int = 8 
         worker.submit(job, "scan")
         return job_out(job, detail=False)
 
-    @r.delete("/jobs/{job_id}", status_code=204, summary="Delete the job and all its files")
+    @r.delete("/jobs/{job_id}", status_code=204,
+              summary="Delete the job; its source and result move to the server's history folder")
     def delete(job_id: str):
         job = get_job(job_id)
         if job.state.status in RUNNING:
@@ -466,7 +468,11 @@ def create_app(store: JobStore, worker: Worker, token: str, max_upload: int = 8 
         worker.cancel(job)  # if queued
         with grab_lock:
             grabbers.pop(job.state.id, None)
-        store.delete(job)
+        try:
+            store.delete(job)
+        except OSError as e:
+            log.error("could not move job %s to history: %s", job_id, e)
+            raise HTTPException(500, f"could not move the files to the history folder, so nothing was deleted: {e}")
         return Response(status_code=204)
 
     # ------------------------------------------------------------ face review
@@ -673,17 +679,23 @@ def _lan_addresses() -> list[str]:
     return sorted(a for a in out if not a.startswith("127."))
 
 
-def serve(host: str, port: int, jobs_dir: Path, token_file: Path, keep_days: float, max_upload_gb: float) -> int:
+def serve(host: str, port: int, jobs_dir: Path, token_file: Path, keep_days: float, max_upload_gb: float,
+          history_dir: Path | None) -> int:
     import uvicorn
 
     from .. import device
 
+    # names and file names can be Cyrillic etc.; when the console output goes to a
+    # file or pipe on Windows its encoding cannot show them, which must not break logging
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     # browsers drop connections all the time (video seeking, closed tabs); on Windows
     # asyncio logs each one as an error with a traceback
     logging.getLogger("asyncio").addFilter(
         lambda rec: not (rec.exc_info and isinstance(rec.exc_info[1], ConnectionResetError)))
-    store = JobStore(jobs_dir, keep_days=keep_days)
+    store = JobStore(jobs_dir, keep_days=keep_days, history=history_dir)
     removed = store.cleanup()
     worker = Worker(store)
     token = load_token(token_file)
@@ -698,6 +710,8 @@ def serve(host: str, port: int, jobs_dir: Path, token_file: Path, keep_days: flo
 
     print(device.summary())
     print(f"jobs: {store.root} ({len(store.all())} kept, {removed} old removed)")
+    print(f"deleted jobs' source and result: {store.history}" if store.history
+          else "deleted jobs are not kept (--no-history)")
     addrs = ["127.0.0.1"] + (_lan_addresses() if host in ("0.0.0.0", "::") else [])
     for a in addrs if host in ("0.0.0.0", "::") else [host]:
         print(f"  http://{a}:{port}{API}   (API docs: http://{a}:{port}/docs)")

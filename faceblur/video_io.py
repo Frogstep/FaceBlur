@@ -44,10 +44,12 @@ class VideoInfo:
     fps: Fraction
     num_frames: int
     duration: float
-    has_audio: bool
+    has_audio: bool  # at least one audio track that can go into the output
     color_matrix: str  # swscale matrix name: bt709 / bt601 / bt2020
     color_range: str  # tv / pc
     vfr: bool
+    audio: tuple[tuple[int, str], ...] = ()  # usable audio tracks: (stream index, codec name)
+    skipped_audio: int = 0  # audio tracks FFmpeg cannot read (left out of the output)
 
     @property
     def fps_float(self) -> float:
@@ -75,7 +77,17 @@ def probe(path: str | Path) -> VideoInfo:
     ).stdout
     info = json.loads(out)
     vs = next(s for s in info["streams"] if s["codec_type"] == "video")
-    has_audio = any(s["codec_type"] == "audio" for s in info["streams"])
+    # some phone apps write an empty placeholder audio track (no codec, 0 Hz, 0
+    # channels); copying it makes the MP4 muxer refuse the whole output
+    audio, skipped = [], 0
+    for s in info["streams"]:
+        if s["codec_type"] != "audio":
+            continue
+        if s.get("codec_name") not in (None, "", "unknown", "none") \
+                and int(s.get("sample_rate") or 0) > 0 and int(s.get("channels") or 0) > 0:
+            audio.append((int(s["index"]), s["codec_name"]))
+        else:
+            skipped += 1
 
     w, h = int(vs["width"]), int(vs["height"])
     rotation = 0
@@ -105,7 +117,7 @@ def probe(path: str | Path) -> VideoInfo:
     matrix = _MATRIX_MAP.get(cs) or ("bt709" if h >= 720 else "bt601")
     rng = "pc" if vs.get("color_range") == "pc" else "tv"
 
-    return VideoInfo(path, w, h, fps, nb, duration, has_audio, matrix, rng, vfr)
+    return VideoInfo(path, w, h, fps, nb, duration, bool(audio), matrix, rng, vfr, tuple(audio), skipped)
 
 
 class FrameReader:
@@ -186,6 +198,10 @@ class FrameGrabber:
         return frame
 
 
+# audio codecs the MP4 container can carry as they are
+_MP4_AUDIO = {"aac", "mp3", "alac", "ac3", "eac3", "opus", "flac"}
+
+
 class FrameWriter:
     """Encodes BGR frames to HEVC (NVENC on the GPU, x265 on the CPU) and copies
     audio from the source."""
@@ -208,8 +224,14 @@ class FrameWriter:
             "-i", str(info.path),
             "-map", "0:v:0",
         ]
-        if info.has_audio:
-            cmd += ["-map", "1:a?", "-c:a", "copy"]
+        # only the audio tracks FFmpeg can read (see probe); copied unchanged when
+        # MP4 can hold them, otherwise converted to AAC
+        for k, (index, acodec) in enumerate(info.audio):
+            cmd += ["-map", f"1:{index}"]
+            if acodec in _MP4_AUDIO:
+                cmd += [f"-c:a:{k}", "copy"]
+            else:
+                cmd += [f"-c:a:{k}", "aac", f"-b:a:{k}", "192k"]
         cmd += [
             "-map_metadata", "1",
             "-vf", f"scale=out_color_matrix={info.color_matrix}:out_range={info.color_range},format=yuv420p",
@@ -229,7 +251,15 @@ class FrameWriter:
         self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, **_NOWIN)
 
     def write(self, frame: np.ndarray) -> None:
-        self._proc.stdin.write(np.ascontiguousarray(frame).tobytes())
+        try:
+            self._proc.stdin.write(np.ascontiguousarray(frame).tobytes())
+        except OSError:
+            # FFmpeg has exited (on Windows this shows as EINVAL, elsewhere as a
+            # broken pipe); its own message says why
+            self._proc.kill()
+            err = self._proc.stderr.read().decode(errors="replace").strip()
+            self._proc.wait()
+            raise RuntimeError(f"FFmpeg stopped while encoding {self.out_path.name}:\n{err or '(no message)'}") from None
 
     def close(self) -> None:
         self._proc.stdin.close()

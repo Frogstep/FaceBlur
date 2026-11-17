@@ -7,6 +7,9 @@
     work/                    detections, thumbnails, render log, safety report, flagged/
     result.mp4               the rendered video
 
+When a job is deleted, its source, result and small records move to
+history/<date>_<name>_<id>/ (see JobStore.delete) for debugging.
+
 Statuses:
   uploading -> queued_scan -> scanning -> review -> queued_render -> rendering
   -> checking -> done; any step can end in failed or cancelled. From review, done
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import threading
 import time
@@ -145,10 +149,20 @@ class Job:
 THUMB = 160  # thumbnail size in pixels
 
 
+# kept in the history folder when a job is deleted (the large caches are not:
+# detections, thumbnails and flagged frames can all be made again)
+HISTORY_FILES = ["job.json", "project.faceblur.json", "result.mp4",
+                 "work/render_log.json", "work/safety_report.json"]
+
+
 class JobStore:
-    def __init__(self, root: str | Path, keep_days: float = 7.0, cache_size: int = 3):
+    def __init__(self, root: str | Path, keep_days: float = 7.0, cache_size: int = 3,
+                 history: str | Path | None = None):
+        """history: folder that receives the source video, the result and the job's
+        small records when a job is deleted (None: deleted jobs are gone)."""
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self.history = Path(history).resolve() if history is not None else None
         self.keep_days = keep_days
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
@@ -203,11 +217,48 @@ class JobStore:
         """Jobs waiting for the worker after a restart, oldest first."""
         return sorted((j for j in self.all() if j.state.status in QUEUED), key=lambda j: j.state.updated)
 
-    def delete(self, job: Job) -> None:
+    def delete(self, job: Job, reason: str = "deleted by the user", archive: bool = True) -> Path | None:
+        """Remove a job. Unless archive is False (or there is no history folder, or
+        the upload never completed), its source, result and records are moved to
+        the history folder first; returns that folder. If moving fails, the job
+        is left as it was and the error is raised."""
+        kept = self._archive(job, reason) if archive else None
         with self._lock:
             self._jobs.pop(job.state.id, None)
         self.forget(job.state.id)
         shutil.rmtree(job.dir, ignore_errors=True)
+        return kept
+
+    def _archive(self, job: Job, reason: str) -> Path | None:
+        if self.history is None or job.state.status == "uploading" or not job.video.is_file():
+            return None
+        s = job.state
+        stem = re.sub(r"[^\w.-]+", "_", Path(s.name).stem, flags=re.UNICODE).strip("._")[:60] or "video"
+        dest = self.history / f"{time.strftime('%Y-%m-%d_%H%M%S')}_{stem}_{s.id[:8]}"
+        dest.mkdir(parents=True)
+        try:
+            for rel in [s.source, *HISTORY_FILES]:
+                src = job.dir / rel
+                if src.is_file():
+                    target = dest / rel
+                    target.parent.mkdir(exist_ok=True)
+                    shutil.move(src, target)  # a rename on the same drive
+            record = json.loads((dest / "job.json").read_text(encoding="utf-8")) if (dest / "job.json").is_file() \
+                else asdict(s)
+            record.update(deleted=time.time(), deleted_reason=reason)
+            (dest / "job.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
+        except BaseException:
+            # put back what was moved, so nothing is lost
+            for f in sorted(dest.rglob("*"), reverse=True):
+                if f.is_file():
+                    back = job.dir / f.relative_to(dest)
+                    if not back.exists():
+                        back.parent.mkdir(exist_ok=True)
+                        shutil.move(f, back)
+            shutil.rmtree(dest, ignore_errors=True)
+            raise
+        log.info("job %s (%s) moved to history: %s", s.id, s.name, dest)
+        return dest
 
     def cleanup(self) -> int:
         """Delete jobs untouched for keep_days (never a busy one)."""
@@ -215,10 +266,15 @@ class JobStore:
             return 0
         limit = time.time() - self.keep_days * 86400
         old = [j for j in self.all() if not j.busy and j.state.updated < limit]
+        done = 0
         for j in old:
             log.info("deleting old job %s (%s)", j.state.id, j.state.name)
-            self.delete(j)
-        return len(old)
+            try:
+                self.delete(j, reason=f"not changed for {self.keep_days:g} days")
+                done += 1
+            except Exception as e:  # e.g. the history disk is full: keep the job, try again later
+                log.error("could not move job %s to history, keeping it: %s", j.state.id, e)
+        return done
 
     # ------------------------------------------------------------ analysis cache
     def analysis(self, job: Job):

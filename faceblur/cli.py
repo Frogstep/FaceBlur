@@ -245,8 +245,11 @@ def cmd_serve(args) -> int:
               f"  pip install fastapi uvicorn python-multipart")
         return 1
     root = Path(__file__).resolve().parent.parent
-    return serve(args.host, args.port, Path(args.jobs_dir or root / "jobs"),
-                 Path(args.token_file or root / "server_token.txt"), args.keep_days, args.max_upload_gb)
+    jobs = Path(args.jobs_dir or root / "jobs").resolve()
+    # next to the jobs folder by default, so moving a deleted job there is a quick rename
+    history = None if args.no_history else Path(args.history_dir or jobs.parent / "history")
+    return serve(args.host, args.port, jobs, Path(args.token_file or root / "server_token.txt"),
+                 args.keep_days, args.max_upload_gb, history)
 
 
 def cmd_gui(args) -> int:
@@ -307,6 +310,10 @@ def main(argv=None) -> int:
     sv.add_argument("--keep-days", type=float, default=7.0,
                     help="delete jobs untouched for this many days (0 = never; default 7)")
     sv.add_argument("--max-upload-gb", type=float, default=8.0, help="largest accepted video (default 8 GB)")
+    sv.add_argument("--history-dir",
+                    help="where a deleted job's source video, result and records are moved, for debugging "
+                         "(default: history/ next to the jobs folder; never cleaned up automatically)")
+    sv.add_argument("--no-history", action="store_true", help="delete jobs completely instead")
     sv.set_defaults(fn=cmd_serve)
 
     args = ap.parse_args(argv)
