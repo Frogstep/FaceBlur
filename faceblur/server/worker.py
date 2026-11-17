@@ -34,9 +34,12 @@ class PipelineOps:
         analysis = job.analysis()
         job.update(status="rendering")
         result = render(project, analysis, progress=progress, cancel=cancel, log=log.info)
+        check = project.settings.safety_check
         info = {"frames": result.frames, "fps": round(result.fps, 1), "unmasked": result.unmasked,
-                "sam": result.sam_status, "safety": "skipped", "flagged": None}
-        (analysis.wd / "safety_report.json").unlink(missing_ok=True)
+                "sam": result.sam_status, "safety": "skipped" if check else "off", "flagged": None}
+        (analysis.wd / "safety_report.json").unlink(missing_ok=True)  # it was about the previous render
+        if not check:  # off in the settings (the default)
+            return info
         job.update(status="checking", rendered=True, render=info)
         try:
             report = safety_check(result.output, load_target_refs(analysis.wd), analysis.wd,

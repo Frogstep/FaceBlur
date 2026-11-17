@@ -1,6 +1,7 @@
-"""Shared pipeline used by both the CLI and the GUI: face scan -> face cards
-the user labels -> per-person plans (with manual corrections) -> render ->
-safety pass.
+"""Shared pipeline used by the CLI, the GUI and the web server: face scan ->
+face cards the user marks to blur (every card starts as not blurred) -> one
+masking plan per track of blurred cards and per drawn box (with manual
+corrections) -> render -> safety pass.
 
 Long operations take progress(stage, done, total) and cancel() -> bool hooks.
 """
@@ -18,7 +19,8 @@ import numpy as np
 
 from .identity import Cancelled, Detections, ManualBox, TargetPlan, plan_labeled, scan, similarity
 from .project import Label, Project
-from .review import UNLABELED, Card, build_cards, card_of_detection, detection_labels, person_refs
+from .review import (BLUR, SOMEONE_ELSE, UNLABELED, Card, build_cards, card_of_detection, chain_cards, is_blur,
+                     person_refs)
 from .video_io import FrameReader, FrameWriter, VideoInfo, probe
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -79,11 +81,13 @@ def _iou(a, b) -> float:
 
 @dataclass
 class PersonInput:
-    index: int  # position in project.people
-    name: str
+    """One masking track: linked blurred cards, or one drawn box."""
+    index: int  # track number (0, 1, ...)
+    name: str  # for logs: the cards in it ("#3+#7") or "drawn box"
     refs: np.ndarray | None  # reference embeddings (safety check only)
-    det_idx: np.ndarray  # detections the user labeled as this person
+    det_idx: np.ndarray  # detections of the track's cards
     manual: list[ManualBox] = field(default_factory=list)
+    cards: list[int] = field(default_factory=list)  # card positions
 
 
 class Analysis:
@@ -154,9 +158,14 @@ class Analysis:
             keep.append(Label(int(self.dets.frame[a]), [round(float(v), 1) for v in self.dets.box[a]], int(label)))
         project.labels = keep
 
-    def unlabeled(self, project: Project) -> list[int]:
-        """Card numbers still waiting for a label."""
-        return [c.number for c, lab in zip(self.cards, self.card_labels(project)) if lab == UNLABELED]
+    def blurred(self, project: Project) -> list[bool]:
+        """Per card: True when the user marked it to blur (cards start unblurred)."""
+        return [is_blur(lab) for lab in self.card_labels(project)]
+
+    def set_blur(self, project: Project, cards, blur: bool) -> None:
+        """Mark cards (positions in self.cards) to blur, or back to not blurred."""
+        for k in cards:
+            self.set_label(project, int(k), BLUR if blur else UNLABELED)
 
     # ------------------------------------------------------------- plans
 
@@ -173,20 +182,31 @@ class Analysis:
                 out.add(i)
         return out
 
-    def person_inputs(self, project: Project) -> list[PersonInput]:
-        det_label = detection_labels(self.dets, self.cards, self.card_labels(project))
-        people = []
-        for pi, person in enumerate(project.people):
-            idx = np.where(det_label == pi)[0]
-            manual = [ManualBox(m.frame, np.array(m.box, np.float32), m.span)
-                      for m in project.manual if m.person == pi]
-            people.append(PersonInput(pi, person.name, person_refs(self.dets, idx), idx, manual))
-        return people
+    def tracks(self, project: Project) -> tuple[list[PersonInput], np.ndarray]:
+        """The masking tracks, and the label per detection that plan_labeled
+        reads: the track number for blurred cards, SOMEONE_ELSE for every other
+        card (never masked), UNLABELED for weak detections outside any card
+        (masked only next to a blurred face)."""
+        blurred = self.blurred(project)
+        det_label = np.full(len(self.dets.frame), UNLABELED, np.int64)
+        for c in self.cards:
+            det_label[c.det_idx] = SOMEONE_ELSE
+        chains = chain_cards(self.dets, self.cards, [k for k, b in enumerate(blurred) if b], self.info.fps_float)
+        out = []
+        for t, chain in enumerate(chains):
+            idx = np.sort(np.concatenate([self.cards[k].det_idx for k in chain]))
+            det_label[idx] = t
+            name = "+".join(f"#{self.cards[k].number}" for k in chain)
+            out.append(PersonInput(t, name, person_refs(self.dets, idx), idx, [], list(chain)))
+        # each drawn box is its own track: it is a SAM 2 prompt of its own
+        for m in project.manual:
+            box = ManualBox(m.frame, np.array(m.box, np.float32), m.span)
+            out.append(PersonInput(len(out), f"drawn box (frame {m.frame})", None, np.zeros(0, np.int64), [box]))
+        return out, det_label
 
     def plans(self, project: Project) -> tuple[list[PersonInput], list[TargetPlan]]:
-        """One plan per person who has labeled faces or drawn boxes."""
-        det_label = detection_labels(self.dets, self.cards, self.card_labels(project))
-        inputs = [p for p in self.person_inputs(project) if len(p.det_idx) or p.manual]
+        """One masking plan per track of blurred cards and per drawn box."""
+        inputs, det_label = self.tracks(project)
         excluded = self.excluded(project)
         plans = [plan_labeled(self.dets, det_label, p.index, self.info.fps_float,
                               excluded=excluded, manual=p.manual) for p in inputs]
@@ -254,15 +274,10 @@ def render(project: Project, analysis: Analysis, progress: Progress | None = Non
            cancel: Cancel | None = None, debug: bool = False, log: Callable[[str], None] = print) -> RenderResult:
     from .mask import apply, combine, draw_debug
 
-    missing = analysis.unlabeled(project)
-    if missing:
-        raise ValueError(f"{len(missing)} face card(s) are not labeled yet: "
-                         f"{', '.join('#' + str(k) for k in missing[:20])}{' ...' if len(missing) > 20 else ''}. "
-                         f"Label every card (a person, someone else, or not a face) before rendering.")
     inputs, plans = analysis.plans(project)
     if not plans:
-        raise ValueError("Nobody is marked to be masked: label at least one face card as a person "
-                         "(or draw a 'mask here too' box).")
+        raise ValueError("No face is marked to blur: mark at least one face card to blur "
+                         "(or draw a box to blur an area).")
     s = project.settings
     info, dets, wd = analysis.info, analysis.dets, analysis.wd
     n = info.num_frames
@@ -293,6 +308,7 @@ def render(project: Project, analysis: Analysis, progress: Progress | None = Non
         stream = ((fr, None, "off") for fr in frames)
 
     np.savez(wd / "target_refs.npz", *[p.refs for p in inputs if p.refs is not None])
+    _save_face_positions(wd, analysis, project, plans)
     stats: dict[str, int] = {}
     per_frame = []
     t0 = time.time()
@@ -333,14 +349,59 @@ def render(project: Project, analysis: Analysis, progress: Progress | None = Non
 
 # ------------------------------------------------------------------ safety
 
+def _save_face_positions(wd: Path, analysis: Analysis, project: Project, plans: list[TargetPlan]) -> None:
+    """For the safety check: where faces were left visible on purpose (cards not
+    blurred, and "don't blur here"), and where faces were blurred, per frame."""
+    dets = analysis.dets
+    target = [set(i for p in plans for i in p.target_dets[f]) for f in range(dets.num_frames)]
+    blurred = analysis.blurred(project)
+    excluded = analysis.excluded(project)
+    vis_f, vis_b = [], []
+    for k, c in enumerate(analysis.cards):
+        for i in c.det_idx:
+            f = int(dets.frame[i])
+            if (not blurred[k] or int(i) in excluded) and int(i) not in target[f]:
+                vis_f.append(f)
+                vis_b.append(dets.box[i])
+    blur_f, blur_b = [], []
+    for p in plans:
+        for f, boxes in enumerate(p.boxes):
+            for b in boxes:
+                blur_f.append(f)
+                blur_b.append(np.asarray(b, np.float32))
+    np.savez(wd / "face_positions.npz",
+             visible_frame=np.array(vis_f, np.int64), visible_box=np.array(vis_b, np.float32).reshape(-1, 4),
+             blur_frame=np.array(blur_f, np.int64), blur_box=np.array(blur_b, np.float32).reshape(-1, 4))
+
+
+def _load_face_positions(wd: Path) -> tuple[dict, dict]:
+    """(visible boxes per frame, blurred boxes per frame) saved by the last render."""
+    p = wd / "face_positions.npz"
+    vis: dict[int, list] = {}
+    blur: dict[int, list] = {}
+    if p.exists():
+        z = np.load(p)
+        for f, b in zip(z["visible_frame"], z["visible_box"]):
+            vis.setdefault(int(f), []).append(b)
+        for f, b in zip(z["blur_frame"], z["blur_box"]):
+            blur.setdefault(int(f), []).append(b)
+    return vis, blur
+
+
 def safety_check(masked: str | Path, refs_list: list[np.ndarray], wd: Path,
                  progress: Progress | None = None, cancel: Cancel | None = None, thr: float = 0.28) -> dict:
     """Re-detects faces in the rendered video and flags frames where any of the
-    masked people is still recognizable. Writes flagged/*.jpg and safety_report.json."""
+    blurred faces is still recognizable. Writes flagged/*.jpg and safety_report.json.
+
+    A face found where the user left a face visible on purpose is not flagged
+    (family members often look alike), unless a blurred face was in the same
+    place on that frame."""
     import cv2
 
     analyzer = get_analyzer()
     info = probe(masked)
+    visible, blurred_at = _load_face_positions(wd)
+    ignored = 0
     flag_dir = wd / "flagged"
     flag_dir.mkdir(exist_ok=True)
     for p in flag_dir.glob("*.jpg"):
@@ -362,6 +423,11 @@ def safety_check(masked: str | Path, refs_list: list[np.ndarray], wd: Path,
             # (deliberately over-sensitive) detector mistakes for a face is ignored
             hits = [(fc, float(s)) for fc, s in zip(faces, sims)
                     if s >= 0.40 or (s >= thr and fc.score >= 0.5)]
+            kept = [(fc, s) for fc, s in hits
+                    if not (any(_iou(fc.box, b) > 0.3 for b in visible.get(f, ()))
+                            and not any(_iou(fc.box, b) > 0.1 for b in blurred_at.get(f, ())))]
+            ignored += len(hits) - len(kept)
+            hits = kept
             if hits:
                 flagged.append({"frame": f, "time": round(f / info.fps_float, 3),
                                 "sim": [round(s, 3) for _, s in hits],
@@ -372,7 +438,8 @@ def safety_check(masked: str | Path, refs_list: list[np.ndarray], wd: Path,
                     cv2.putText(img, f"{s:.2f}", (int(fc.box[0]), int(fc.box[1]) - 6),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 cv2.imwrite(str(flag_dir / f"{f:06d}.jpg"), img)
-    report = {"video": str(masked), "threshold": thr, "frames": info.num_frames, "flagged": flagged}
+    report = {"video": str(masked), "threshold": thr, "frames": info.num_frames, "flagged": flagged,
+              "ignored_visible": ignored}  # look-alike matches on faces left visible on purpose
     (wd / "safety_report.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
     return report
 

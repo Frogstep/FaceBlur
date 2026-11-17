@@ -2,8 +2,7 @@
 
   python -m faceblur gui    [VIDEO | PROJECT]   open the desktop app
   python -m faceblur pick   VIDEO               scan faces, write the numbered face-card sheet
-  python -m faceblur render VIDEO --face 1,3 --other 2 [--rest other]
-                                                mask the person on cards 1 and 3
+  python -m faceblur render VIDEO --blur 1,3    blur the faces on cards 1 and 3 (the rest stay visible)
   python -m faceblur render --project P.faceblur.json   render a project saved from the app
   python -m faceblur check  MASKED --video SRC  safety pass on an already rendered file
   python -m faceblur serve  [--port 8765]       HTTP API for other devices (e.g. a phone app)
@@ -97,15 +96,13 @@ def cmd_pick(args) -> int:
     contact_sheet(analysis, sheet)
     fps = analysis.info.fps_float
     print(f"\n{len(analysis.cards)} face cards. Sheet: {sheet}")
-    print("Each card is one face followed continuously; similar faces are listed next to each other,")
-    print("but nothing is joined automatically: you say who each card is.")
+    print("Each card is one face followed continuously; similar faces are listed next to each other.")
+    print("Every face stays visible unless you list its card to blur.")
     for c in analysis.cards:
         fr = analysis.dets.frame[c.det_idx]
         print(f"  #{c.number}: {fr.min() / fps:.1f}s - {fr.max() / fps:.1f}s, {len(c.det_idx)} frames")
-    print(f"\nNext, label every card, e.g.:")
-    print(f"  python -m faceblur render {args.video} --face 1,2,5 --face 3,4 --other 6 --not-face 7")
-    print("  --face once per person to mask; --other = real face, not masked; --not-face = false detection;")
-    print("  --rest other / --rest not-face labels all cards you did not list.")
+    print(f"\nNext, choose the cards to blur, e.g.:")
+    print(f"  python -m faceblur render {args.video} --blur 1,2,5")
     return 0
 
 
@@ -113,35 +110,17 @@ def _card_list(spec: str) -> list[int]:
     return [int(x) for x in spec.replace(" ", "").split(",") if x]
 
 
-def _labels_from_args(project, analysis, args) -> str | None:
-    """Fill project.labels from --face/--other/--not-face/--rest. Returns an error or None."""
-    from .project import Person
-    from .review import NOT_A_FACE, SOMEONE_ELSE
-
+def _blur_from_args(project, analysis, args) -> str | None:
+    """Mark the cards given with --blur. Returns an error or None."""
     by_number = {c.number: k for k, c in enumerate(analysis.cards)}
-    given: dict[int, int] = {}
     try:
-        for spec in args.face or []:
-            project.people.append(Person(f"Person {len(project.people) + 1}"))
-            for n in _card_list(spec):
-                given[n] = len(project.people) - 1
-        for spec in args.other or []:
-            for n in _card_list(spec):
-                given[n] = SOMEONE_ELSE
-        for spec in args.not_face or []:
-            for n in _card_list(spec):
-                given[n] = NOT_A_FACE
+        numbers = {n for spec in args.blur or [] for n in _card_list(spec)}
     except ValueError:
-        return "card lists are numbers separated by commas, e.g. --face 1,2,5"
-    unknown = sorted(n for n in given if n not in by_number)
+        return "card lists are numbers separated by commas, e.g. --blur 1,2,5"
+    unknown = sorted(n for n in numbers if n not in by_number)
     if unknown:
         return f"no card #{', #'.join(map(str, unknown))} (this video has {len(analysis.cards)} cards)"
-    if args.rest:
-        rest = SOMEONE_ELSE if args.rest == "other" else NOT_A_FACE
-        for n in by_number:
-            given.setdefault(n, rest)
-    for n, lab in given.items():
-        analysis.set_label(project, by_number[n], lab)
+    analysis.set_blur(project, [by_number[n] for n in sorted(numbers)], True)
     return None
 
 
@@ -151,24 +130,22 @@ def cmd_render(args) -> int:
     from .pipeline import render
     from .project import Project
 
-    labels_given = bool(args.face or args.other or args.not_face or args.rest)
     if args.project:
         if not Path(args.project).is_file():
             print(f"project file not found: {args.project}")
-            print("A project is created when you open the video in the app and label its faces")
-            print("(it is saved automatically next to the video). Or label the cards here: run")
-            print("`python -m faceblur pick VIDEO`, then `render VIDEO --face ... --rest other`.")
+            print("A project is created when you open the video in the app and choose faces to blur")
+            print("(it is saved automatically next to the video). Or choose them here: run")
+            print("`python -m faceblur pick VIDEO`, then `render VIDEO --blur ...`.")
             return 1
-        if labels_given:
-            print("use either --project or card labels (--face/--other/--not-face/--rest), not both")
+        if args.blur:
+            print("use either --project or --blur, not both")
             return 1
         project = Project.load(args.project)
-        print(f"project: {args.project} ({len(project.people)} people, {len(project.labels)} labeled cards, "
-              f"{len(project.exclusions)} exclusions, {len(project.manual)} drawn boxes)")
-    elif args.video and labels_given:
+        print(f"project: {args.project} ({len(project.exclusions)} exclusions, {len(project.manual)} drawn boxes)")
+    elif args.video and args.blur:
         project = Project.new(args.video)
     else:
-        print("give a VIDEO with card labels (see `pick`), or --project FILE")
+        print("give a VIDEO with --blur CARDS (see `pick`), or --project FILE")
         return 1
     if args.output:
         project.output = str(Path(args.output).resolve())
@@ -176,20 +153,21 @@ def cmd_render(args) -> int:
     for key in ("style", "strength", "pad"):
         if getattr(args, key) is not None:
             setattr(s, key, getattr(args, key))
+    if args.sam:
+        s.use_sam = True
     if args.no_sam:
         s.use_sam = False
 
     analysis = _open(Path(project.video))
     if not args.project:
-        err = _labels_from_args(project, analysis, args)
+        err = _blur_from_args(project, analysis, args)
         if err:
             print(err)
             return 1
-    missing = analysis.unlabeled(project)
-    if missing:
-        print(f"{len(missing)} card(s) have no label: {', '.join('#' + str(k) for k in missing)}")
-        print("Every card needs one: --face (mask), --other (real face, not masked) or --not-face,")
-        print("or add --rest other / --rest not-face for all cards you did not list.")
+    blurred = [c.number for c, b in zip(analysis.cards, analysis.blurred(project)) if b]
+    print(f"blurring face cards: {', '.join('#' + str(n) for n in blurred) or 'none'}")
+    if not blurred and not project.manual:
+        print("no face is marked to blur")
         return 1
 
     bar = _Bar()
@@ -275,23 +253,17 @@ def main(argv=None) -> int:
     p.add_argument("video")
     p.set_defaults(fn=cmd_pick)
 
-    r = sub.add_parser("render", parents=[common], help="mask the chosen people and encode H.265")
+    r = sub.add_parser("render", parents=[common], help="blur the chosen faces and encode H.265")
     r.add_argument("video", nargs="?")
-    r.add_argument("--face", action="append", metavar="N[,N...]",
-                   help="card numbers (from `pick`) of one person to mask, e.g. --face 1,2,5; "
-                        "repeat --face for each person")
-    r.add_argument("--other", action="append", metavar="N[,N...]",
-                   help="cards that are a real face but must NOT be masked")
-    r.add_argument("--not-face", dest="not_face", action="append", metavar="N[,N...]",
-                   help="cards that are not a face (false detections)")
-    r.add_argument("--rest", choices=["other", "not-face"],
-                   help="label every card not listed above as 'other' or 'not-face'")
+    r.add_argument("--blur", "--face", dest="blur", action="append", metavar="N[,N...]",
+                   help="card numbers (from `pick`) to blur, e.g. --blur 1,2,5; every other face stays visible")
     r.add_argument("--project", help="render a .faceblur.json project saved from the app")
     r.add_argument("-o", "--output")
     r.add_argument("--style", choices=["pixelate", "blur", "fill"])
     r.add_argument("--strength", type=float, help="higher = coarser pixelation (default 1.0)")
     r.add_argument("--pad", type=float, help="extra margin around the face box (default 0.3)")
-    r.add_argument("--no-sam", action="store_true", help="box/ellipse masking only (no SAM 2)")
+    r.add_argument("--sam", action="store_true", help="precise face outlines with SAM 2 (slower; off by default)")
+    r.add_argument("--no-sam", action="store_true", help="box/ellipse masking only (the default for new projects)")
     r.add_argument("--debug", action="store_true", help="also write work/<name>/debug.mp4 overlay")
     r.add_argument("--no-check", action="store_true", help="skip the safety pass")
     r.set_defaults(fn=cmd_render)

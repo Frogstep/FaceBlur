@@ -25,7 +25,7 @@ function detailText(d) {
   if (!d) return "";
   if (typeof d === "string") return t(d);
   if (Array.isArray(d)) return d.map((x) => x.msg || JSON.stringify(x)).join("; ");
-  if (d.message) return t(d.message) + (d.unlabeled ? `: #${d.unlabeled.slice(0, 15).join(", #")}${d.unlabeled.length > 15 ? " …" : ""}` : "");
+  if (d.message) return t(d.message);
   return JSON.stringify(d);
 }
 
@@ -109,7 +109,7 @@ const STATUS = {
   uploading: "Uploading",
   queued_scan: "Waiting to detect faces",
   scanning: "Detecting faces",
-  review: "Label the faces",
+  review: "Choose faces to blur",
   queued_render: "Waiting to render",
   rendering: "Rendering",
   checking: "Safety check",
@@ -131,22 +131,6 @@ function progressBar(done, total) {
   if (total) bar.firstChild.style.width = `${Math.min(100, (100 * done) / total)}%`;
   return bar;
 }
-
-// label colours: the same as the boxes the server draws on frames
-const PERSON_COLORS = ["#ff5050", "#3ca0ff", "#50dc50", "#dc50dc", "#ffc83c", "#50ffff", "#ff78a0", "#c8ff78", "#78a0c8"];
-function labelColor(v) {
-  if (v === null || v === undefined) return "#ffe600";
-  if (v === "other") return "#c8c8c8";
-  if (v === "not_face") return "#8a8a8a";
-  return PERSON_COLORS[v % PERSON_COLORS.length];
-}
-function labelText(v, people) {
-  if (v === null || v === undefined) return t("No label");
-  if (v === "other") return t("Someone else");
-  if (v === "not_face") return t("Not a face");
-  return people[v] ? people[v].name : t("Person {k}", { k: v + 1 });
-}
-const dot = (color) => h("span", { class: "dot", style: { background: color } });
 
 // ------------------------------------------------------------------ header
 
@@ -456,10 +440,8 @@ function jobView(id) {
   let timer = null;
   let job = null;
   let cards = null; // from /cards
-  let project = null; // { people, labels, unlabeled, settings }
+  let project = null; // { blur: [card numbers], settings }
   let cardsKey = ""; // the face scan the cards belong to
-  let selected = new Set(); // card numbers
-  let anchor = null; // for shift-click
   let filter = "all";
   let modal = null;
 
@@ -521,8 +503,8 @@ function jobView(id) {
       pill(job.status),
       h("button", {
         disabled: BUSY.has(job.status) || job.status === "uploading",
-        title: t("Discard the detections and labels and scan the video again"),
-        onclick: () => confirm(t("Detect faces again? All face labels are cleared.")) &&
+        title: t("Discard the detected faces and the choice of faces to blur, and scan the video again"),
+        onclick: () => confirm(t("Detect faces again? The choice of faces to blur is cleared.")) &&
           action(() => api(`/jobs/${id}/scan`, { method: "POST" })),
       }, t("Detect again")),
       h("button", {
@@ -576,7 +558,8 @@ function jobView(id) {
     const video = h("video", { controls: true, preload: "metadata", playsinline: true, src: `${url}?download=false&s=${res.size}` });
     video.addEventListener("error", () => note.classList.remove("hidden"));
     let safety;
-    if (res.safety !== "done") safety = h("div", { class: "alert warn" }, t("The safety check was skipped."));
+    if (res.safety === "off") safety = h("p", { class: "small muted" }, t("The safety check is off (turn it on in the settings below)."));
+    else if (res.safety !== "done") safety = h("div", { class: "alert warn" }, t("The safety check was skipped."));
     else if (res.flagged) safety = h("div", { class: "alert warn" }, tn(res.flagged,
       "A masked face may still be recognizable on {n} frame. Check it below; fix hard frames in the desktop app if needed.",
       "A masked face may still be recognizable on {n} frames. Check them below; fix hard frames in the desktop app if needed."));
@@ -601,257 +584,150 @@ function jobView(id) {
   }
 
   // -------------------------------------------------------------- review
+  // Every face starts as not blurred; a click on a card switches it.
   let cardEls = new Map(); // number -> element
-  let counterEl, renderBtn, renderWhy, peopleEl, assignEl, gridEl, selInfo;
+  let blurSet = new Set(); // numbers of the cards to blur
+  let counterEl, renderBtn, renderWhy, gridEl;
 
   async function loadReview() {
     try {
       [cards, project] = await Promise.all([api(`/jobs/${id}/cards`), api(`/jobs/${id}/project`)]);
     } catch (e) { fail(e); return; }
     if (!alive) return;
-    selected = new Set([...selected].filter((n) => n <= cards.length));
+    blurSet = new Set(project.blur);
     drawReview();
   }
 
   function drawReview() {
-    counterEl = h("span", { class: "small" });
-    selInfo = h("span", { class: "small muted" });
-    peopleEl = h("div", { class: "people" });
-    assignEl = h("div", { class: "group" });
+    counterEl = h("strong", { class: "count" });
     gridEl = h("div", { class: "cards" });
     renderBtn = h("button", { class: "primary", onclick: () => action(() => api(`/jobs/${id}/render`, { method: "POST" })) }, t("Render"));
     renderWhy = h("span", { class: "small muted" });
     const filterSel = h("select", {
-      "aria-label": t("Not labeled"),
+      "aria-label": t("Show"),
       onchange: () => { filter = filterSel.value; drawGrid(); },
-    }, h("option", { value: "all" }, t("All cards")), h("option", { value: "unlabeled" }, t("Not labeled")));
+    }, h("option", { value: "all" }, t("All faces")), h("option", { value: "blur" }, t("Blurred")),
+    h("option", { value: "keep" }, t("Not blurred")));
     filterSel.value = filter;
-    const k = (x) => h("kbd", {}, x);
 
     reviewBox.replaceChildren(
       h("div", { class: "panel" },
         h("h2", {}, t("Faces")),
-        h("p", { class: "small muted" },
-          t("Each card is one face followed continuously through the video. Say who every card is: a person to mask, someone else (stays visible) or not a face. One person usually has several cards. Similar faces are listed next to each other."),
-          " ", t("Keys:"), " ", k("1"), "–", k("9"), ` ${t("person")}, `, k("O"), ` ${t("someone else")}, `,
-          k("N"), ` ${t("not a face")}, `, k("Del"), ` ${t("clear")}, `, k("Ctrl+A"), ` ${t("select all")}, `,
-          k("Enter"), ` ${t("view frame")}.`),
-        peopleEl,
+        h("p", { class: "muted" }, t("Every face stays visible until you choose to blur it. Click a face to blur it; click it again to leave it visible.")),
         h("div", { class: "toolbar" },
-          h("div", { class: "group" }, filterSel, counterEl),
-          h("span", { class: "sep" }),
-          h("div", { class: "group" }, selInfo, assignEl),
-          h("span", { class: "sep" }),
-          h("div", { class: "group" }, h("span", { class: "small muted" }, t("Rest:")),
-            h("button", { onclick: () => labelRest("other"), title: t("Label every card without a label as someone else") }, t("Someone else")),
-            h("button", { onclick: () => labelRest("not_face"), title: t("Label every card without a label as not a face") }, t("Not a face")))),
+          counterEl,
+          h("span", { class: "spacer" }),
+          h("div", { class: "group" }, filterSel,
+            h("button", { onclick: () => setAll(true) }, t("Blur all")),
+            h("button", { onclick: () => setAll(false) }, t("Blur none")))),
         gridEl),
       settingsPanel(),
       h("div", { class: "panel row" }, renderBtn, renderWhy));
-    drawPeople();
     drawGrid();
     updateCounts();
   }
 
-  function drawPeople() {
-    const people = project.people;
-    peopleEl.replaceChildren(
-      h("span", { class: "small muted" }, t("People to mask:")),
-      ...people.map((p, i) => h("span", { class: "button chip", title: t("Click to rename") },
-        dot(labelColor(i)),
-        h("span", {
-          onclick: async () => {
-            const name = prompt(t("Name"), p.name);
-            if (!name || !name.trim()) return;
-            const next = people.map((x, j) => ({ name: j === i ? name.trim() : x.name }));
-            try { project.people = await api(`/jobs/${id}/people`, { method: "PUT", json: next }); refreshLabels(); } catch (e) { fail(e); }
-          },
-        }, `${i + 1} ${p.name}`),
-        i === people.length - 1 ? h("button", {
-          class: "x", title: t("Remove (only when no card is labeled with this person)"),
-          onclick: async () => {
-            try { project.people = await api(`/jobs/${id}/people`, { method: "PUT", json: people.slice(0, -1) }); refreshLabels(); } catch (e) { fail(e); }
-          },
-        }, "×") : null)),
-      h("button", { onclick: () => addPerson().catch(fail) }, t("+ Person")));
-    // assign buttons for the selection
-    assignEl.replaceChildren(
-      ...people.map((p, i) => h("button", { onclick: () => assign([...selected], i), title: t("Key {k}", { k: i + 1 }) },
-        dot(labelColor(i)), p.name)),
-      h("button", { onclick: () => assignNewPerson([...selected]) }, t("New person")),
-      h("button", { onclick: () => assign([...selected], "other"), title: t("Key {k}", { k: "O" }) }, t("Someone else")),
-      h("button", { onclick: () => assign([...selected], "not_face"), title: t("Key {k}", { k: "N" }) }, t("Not a face")),
-      h("button", { onclick: () => assign([...selected], null), title: t("Key {k}", { k: "Del" }) }, t("Clear")));
-    updateSelection();
-  }
-
-  async function addPerson() {
-    const next = [...project.people.map((p) => ({ name: p.name })), { name: t("Person {k}", { k: project.people.length + 1 }) }];
-    project.people = await api(`/jobs/${id}/people`, { method: "PUT", json: next });
-    drawPeople();
-    return project.people.length - 1;
-  }
-
-  async function assignNewPerson(nums) {
-    try {
-      const i = await addPerson();
-      if (nums.length) await assign(nums, i);
-    } catch (e) { fail(e); }
-  }
-
   function visibleCards() {
-    return filter === "unlabeled" ? cards.filter((c) => project.labels[c.number] == null) : cards;
+    if (filter === "blur") return cards.filter((c) => blurSet.has(c.number));
+    if (filter === "keep") return cards.filter((c) => !blurSet.has(c.number));
+    return cards;
   }
 
   function drawGrid() {
     cardEls = new Map();
     const list = visibleCards();
     if (!list.length) {
-      gridEl.replaceChildren(h("p", { class: "muted" }, cards.length ? t("Every card has a label.") : t("No faces were found in this video.")));
+      gridEl.replaceChildren(h("p", { class: "muted" }, !cards.length ? t("No faces were found in this video.")
+        : filter === "blur" ? t("No face is blurred yet.") : t("Every face is blurred.")));
       return;
     }
     gridEl.replaceChildren(...list.map((c) => {
-      const badge = h("span", { class: "badge" });
-      const check = h("input", { type: "checkbox", class: "check", "aria-label": t("Select card {n}", { n: c.number }),
-        onclick: (e) => { e.stopPropagation(); toggle(c.number); } });
-      const el = h("div", {
-        class: "card", tabindex: "0", "data-n": c.number,
-        onclick: (e) => clickCard(c.number, e),
-        ondblclick: () => openFrame(c),
-      },
-      h("div", { class: "head" }, check, h("span", { class: "num" }, `#${c.number}`), badge,
-        h("span", { class: "meta" }, `${fmtTime(c.start)}–${fmtTime(c.end)} · ${tn(c.frames, "{n} frame", "{n} frames")}`),
-        h("button", { class: "view", onclick: (e) => { e.stopPropagation(); openFrame(c); }, title: t("View on the video (Enter)") }, t("View"))),
-      h("div", { class: "thumbs" }, c.thumbs.map((src, k) => h("img", {
-        src, loading: "lazy", alt: "", width: "160", height: "160",
-        onclick: (e) => { if (e.detail === 2) { e.stopPropagation(); openFrame(c, k); } },
-      }))));
-      el._badge = badge;
-      el._check = check;
+      const state = h("span", { class: "state" });
+      const el = h("div", { class: "card", tabindex: "0", role: "switch", "data-n": c.number, onclick: () => toggle(c.number) },
+        h("div", { class: "head" },
+          h("span", { class: "num" }, `#${c.number}`),
+          state,
+          h("span", { class: "meta" }, `${fmtTime(c.start)}–${fmtTime(c.end)} · ${tn(c.frames, "{n} frame", "{n} frames")}`),
+          h("button", { class: "view", onclick: (e) => { e.stopPropagation(); openFrame(c); }, title: t("Show this face on the video") }, t("View"))),
+        h("div", { class: "thumbs" }, c.thumbs.map((src) => h("img", { src, loading: "lazy", alt: "", width: "160", height: "160" }))));
+      el._state = state;
       cardEls.set(c.number, el);
       paintCard(c.number);
       return el;
     }));
-    updateSelection();
   }
 
   function paintCard(n) {
     const el = cardEls.get(n);
     if (!el) return;
-    const v = project.labels[n];
-    el._badge.textContent = labelText(v, project.people);
-    el._badge.style.background = labelColor(v);
-  }
-
-  function refreshLabels() {
-    for (const n of cardEls.keys()) paintCard(n);
-    drawPeople();
-    updateCounts();
-  }
-
-  function clickCard(n, e) {
-    if (e.shiftKey && anchor !== null) {
-      const order = visibleCards().map((c) => c.number);
-      const [a, b] = [order.indexOf(anchor), order.indexOf(n)].sort((x, y) => x - y);
-      if (!(e.ctrlKey || e.metaKey)) selected.clear();
-      order.slice(a, b + 1).forEach((k) => selected.add(k));
-    } else if (e.ctrlKey || e.metaKey) {
-      toggle(n);
-      return;
-    } else {
-      selected = new Set([n]);
-      anchor = n;
-    }
-    updateSelection();
-  }
-
-  function toggle(n) {
-    if (selected.has(n)) selected.delete(n); else selected.add(n);
-    anchor = n;
-    updateSelection();
-  }
-
-  function updateSelection() {
-    for (const [n, el] of cardEls) {
-      const on = selected.has(n);
-      el.classList.toggle("selected", on);
-      el._check.checked = on;
-    }
-    if (selInfo) selInfo.textContent = selected.size ? tn(selected.size, "{n} selected:", "{n} selected:") : t("Select cards, then:");
-    if (assignEl) assignEl.querySelectorAll("button").forEach((b) => { b.disabled = !selected.size; });
+    const on = blurSet.has(n);
+    el.classList.toggle("blur", on);
+    el.setAttribute("aria-checked", String(on));
+    el.setAttribute("aria-label", t(on ? "Face #{n}: blurred" : "Face #{n}: not blurred", { n }));
+    el._state.textContent = on ? t("Blurred") : t("Not blurred");
   }
 
   function updateCounts() {
-    project.unlabeled = cards.filter((c) => project.labels[c.number] == null).map((c) => c.number);
-    const left = project.unlabeled.length;
-    counterEl.textContent = left
-      ? tn(left, "{n} of {total} cards without a label", "{n} of {total} cards without a label", { total: cards.length })
-      : t("All {n} cards labeled", { n: cards.length });
-    counterEl.className = left ? "small" : "small muted";
+    counterEl.textContent = tn(blurSet.size, "{n} of {total} faces blurred", "{n} of {total} faces blurred", { total: cards.length });
+    counterEl.classList.toggle("on", blurSet.size > 0);
     updateRenderButton();
   }
 
   function updateRenderButton() {
     if (!renderBtn || !job || !project) return;
-    const left = project.unlabeled.length;
-    const anyPerson = Object.values(project.labels).some((v) => typeof v === "number");
     let why = "";
     if (BUSY.has(job.status)) why = statusText(job.status) + "…";
-    else if (!cards.length) why = t("No faces to mask.");
-    else if (left) why = t("Label every card first ({n} left).", { n: left });
-    else if (!anyPerson) why = t("Label at least one card as a person to mask.");
+    else if (!cards.length) why = t("No faces to blur.");
+    else if (!blurSet.size) why = t("Click the faces you want to blur.");
     renderBtn.disabled = !!why;
     renderBtn.textContent = job.result ? t("Render again") : t("Render");
-    renderWhy.textContent = why || t("Masks every person's cards, then runs the safety check.");
+    renderWhy.textContent = why || (project.settings.safety_check
+      ? tn(blurSet.size, "Blurs {n} face, then runs the safety check.", "Blurs {n} faces, then runs the safety check.")
+      : tn(blurSet.size, "Blurs {n} face.", "Blurs {n} faces."));
   }
 
-  async function assign(nums, value) {
+  async function setBlur(nums, on) {
     if (!nums.length) return;
+    const before = new Set(blurSet);
+    nums.forEach((n) => (on ? blurSet.add(n) : blurSet.delete(n)));
+    nums.forEach(paintCard); // show the change at once; the server confirms it
+    updateCounts();
     try {
-      const r = await api(`/jobs/${id}/labels`, {
-        method: "PUT", json: { labels: Object.fromEntries(nums.map((n) => [String(n), value])) },
-      });
-      nums.forEach((n) => { project.labels[n] = value; paintCard(n); });
-      project.unlabeled = r.unlabeled;
-      updateCounts();
-      // like the desktop app: after labeling one card, go on to the next card without a label
-      if (nums.length === 1 && value !== null) selectNextUnlabeled(nums[0]);
-      if (filter === "unlabeled") drawGrid();
-    } catch (e) { fail(e); }
+      const r = await api(`/jobs/${id}/blur`, { method: "PATCH", json: { cards: Object.fromEntries(nums.map((n) => [String(n), on])) } });
+      blurSet = new Set(r.blur);
+    } catch (e) {
+      blurSet = before;
+      fail(e);
+    }
+    if (filter !== "all") drawGrid(); else for (const n of cardEls.keys()) paintCard(n);
+    updateCounts();
   }
 
-  function selectNextUnlabeled(after) {
-    const order = cards.map((c) => c.number);
-    const start = order.indexOf(after);
-    const next = [...order.slice(start + 1), ...order.slice(0, start)].find((n) => project.labels[n] == null);
-    if (next === undefined) return;
-    selected = new Set([next]);
-    anchor = next;
-    updateSelection();
-    const el = cardEls.get(next);
-    if (el) { el.scrollIntoView({ block: "nearest", behavior: "smooth" }); el.focus({ preventScroll: true }); }
+  function toggle(n) {
+    return setBlur([n], !blurSet.has(n));
   }
 
-  async function labelRest(value) {
-    const left = cards.filter((c) => project.labels[c.number] == null).length;
-    if (!left) { toast(t("Every card already has a label.")); return; }
-    if (!confirm(t("Label the {n} card(s) without a label as “{label}”?", { n: left, label: labelText(value, []) }))) return;
-    try {
-      await api(`/jobs/${id}/labels`, { method: "PUT", json: { rest: value } });
-      project = await api(`/jobs/${id}/project`);
-      refreshLabels();
-      if (filter === "unlabeled") drawGrid();
-    } catch (e) { fail(e); }
+  function setAll(on) {
+    const nums = cards.map((c) => c.number).filter((n) => blurSet.has(n) !== on);
+    if (!on && nums.length && !confirm(t("Remove the blur from all {n} faces?", { n: nums.length }))) return;
+    return setBlur(nums, on);
   }
 
   // -------------------------------------------------------------- settings
   function settingsPanel() {
     const s = project.settings;
-    let pending = null;
+    let timer = null;
+    let unsent = {}; // changes waiting to be sent (several may come within the delay)
     const save = (patch) => {
       Object.assign(s, patch);
-      clearTimeout(pending);
-      pending = setTimeout(() => api(`/jobs/${id}/settings`, { method: "PATCH", json: patch }).catch(fail), 250);
+      Object.assign(unsent, patch);
+      updateRenderButton();
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const body = unsent;
+        unsent = {};
+        api(`/jobs/${id}/settings`, { method: "PATCH", json: body }).catch(fail);
+      }, 250);
     };
     const range = (key, min, max, step, fmt) => {
       const out = h("span", { class: "muted" }, fmt(s[key]));
@@ -867,14 +743,19 @@ function jobView(id) {
     const [strength, strengthOut] = range("strength", 0.5, 3, 0.1, (v) => `${v.toLocaleString(language(), { minimumFractionDigits: 1, maximumFractionDigits: 1 })}×`);
     const [pad, padOut] = range("pad", 0, 0.8, 0.05, (v) => `${Math.round(v * 100)}%`);
     const sam = h("input", { type: "checkbox", checked: s.use_sam, onchange: () => save({ use_sam: sam.checked }) });
+    const check = h("input", { type: "checkbox", checked: s.safety_check,
+      onchange: () => save({ safety_check: check.checked }) });
     return h("div", { class: "panel" },
-      h("h2", {}, t("Mask")),
+      h("h2", {}, t("Settings")),
       h("div", { class: "settings" },
         h("label", {}, t("Style"), style),
         h("label", {}, h("span", {}, `${t("Strength")} `, strengthOut), strength),
         h("label", {}, h("span", {}, `${t("Margin around the face")} `, padOut), pad),
         h("label", { class: "inline" }, sam, h("span", {}, t("Exact face outline (SAM 2)"),
-          h("br"), h("span", { class: "small muted" }, t("Off: ellipses, much faster"))))));
+          h("br"), h("span", { class: "small muted" }, t("Slower. Off: ellipses, much faster")))),
+        h("label", { class: "inline" }, check, h("span", {}, t("Run safety check after rendering"),
+          h("br"), h("span", { class: "small muted" },
+            t("Looks for blurred faces that are still recognizable in the result (slower)"))))));
   }
 
   // -------------------------------------------------------------- frame viewer
@@ -885,7 +766,7 @@ function jobView(id) {
     const img = h("img", { class: "frame", alt: t("video frame") });
     const info = h("span", { class: "small muted" });
     const width = Math.min(1600, Math.round(Math.min(window.innerWidth, 1400) * (window.devicePixelRatio || 1)));
-    let rev = 0; // reload the frame after a label change (box colours)
+    let rev = 0; // reload the frame after a change (box colours)
     const show = () => {
       f = Math.max(0, Math.min(total - 1, Math.round(f)));
       img.src = `${API}/jobs/${id}/frames/${f}.jpg?w=${width}&v=${rev}`;
@@ -897,35 +778,38 @@ function jobView(id) {
       const i = d > 0 ? fr.findIndex((x) => x > f) : fr.length - 1 - [...fr].reverse().findIndex((x) => x < f);
       if (i >= 0 && i < fr.length && fr[i] !== undefined) { f = fr[i]; show(); }
     };
-    const badge = h("span", { class: "badge" });
+    const state = h("span", { class: "state" });
+    const switchBtn = h("button", { class: "primary" });
     const paint = () => {
-      badge.textContent = labelText(project.labels[card.number], project.people);
-      badge.style.background = labelColor(project.labels[card.number]);
+      const on = blurSet.has(card.number);
+      state.textContent = on ? t("Blurred") : t("Not blurred");
+      state.classList.toggle("on", on);
+      switchBtn.textContent = on ? t("Don't blur #{n}", { n: card.number }) : t("Blur #{n}", { n: card.number });
     };
-    const setLabel = (v) => async () => { await assign([card.number], v); paint(); rev++; show(); };
+    const flip = async () => { await toggle(card.number); paint(); rev++; show(); };
+    switchBtn.onclick = flip;
     paint();
-    const box = h("div", { class: "box", role: "dialog", "aria-label": t("Card #{n}", { n: card.number }) },
-      h("div", { class: "row" }, h("strong", {}, t("Card #{n}", { n: card.number })), badge, info, h("span", { class: "spacer" }),
+    const box = h("div", { class: "box", role: "dialog", "aria-label": t("Face #{n}", { n: card.number }) },
+      h("div", { class: "row" }, h("strong", {}, t("Face #{n}", { n: card.number })), state, info, h("span", { class: "spacer" }),
         h("button", { onclick: closeModal }, t("Close"))),
       img,
       h("div", { class: "row" },
-        h("button", { onclick: sampleStep(-1), title: t("Previous sample of this card") }, t("◀ Card")),
+        switchBtn,
+        h("span", { class: "spacer" }),
+        h("button", { onclick: sampleStep(-1), title: t("An earlier picture of this face") }, t("◀ Earlier")),
         h("button", { onclick: step(-fps), title: "Shift+←" }, "−1 s"),
         h("button", { onclick: step(-1), title: "←" }, "−1"),
         h("button", { onclick: step(1), title: "→" }, "+1"),
         h("button", { onclick: step(fps), title: "Shift+→" }, "+1 s"),
-        h("button", { onclick: sampleStep(1), title: t("Next sample of this card") }, t("Card ▶"))),
-      h("div", { class: "row" }, h("span", { class: "small muted" }, t("#{n} is:", { n: card.number })),
-        ...project.people.map((p, i) => h("button", { onclick: setLabel(i) }, dot(labelColor(i)), p.name)),
-        h("button", { onclick: setLabel("other") }, t("Someone else")),
-        h("button", { onclick: setLabel("not_face") }, t("Not a face"))),
+        h("button", { onclick: sampleStep(1), title: t("A later picture of this face") }, t("Later ▶"))),
       h("p", { class: "small muted", style: { margin: 0 } },
-        t("Boxes are numbered by card and coloured by label (yellow: no label yet).")));
+        t("Red boxes are blurred, green boxes stay visible. The numbers are the face numbers in the list.")));
     modal = h("div", { class: "modal", onclick: (e) => { if (e.target === modal) closeModal(); } }, box);
     modal._keys = (e) => {
       if (e.key === "Escape") closeModal();
       else if (e.key === "ArrowLeft") (e.shiftKey ? step(-fps) : step(-1))();
       else if (e.key === "ArrowRight") (e.shiftKey ? step(fps) : step(1))();
+      else if (e.code === "KeyB") flip();
       else return;
       e.preventDefault();
     };
@@ -946,39 +830,21 @@ function jobView(id) {
   }
 
   // -------------------------------------------------------------- keys
+  // on a focused face card: Space/Enter switches it, V shows it on the video,
+  // the arrow keys move between cards
   function onKey(e) {
     if (modal) { modal._keys(e); return; }
-    if (!cards || e.target.closest("input, select, textarea")) return;
-    const nums = [...selected];
-    // e.code, not e.key: the shortcuts work on a Russian keyboard layout too
-    const code = e.code || "";
-    if ((e.ctrlKey || e.metaKey) && code === "KeyA") {
-      selected = new Set(visibleCards().map((c) => c.number));
-      updateSelection();
-    } else if (e.ctrlKey || e.metaKey || e.altKey) {
-      return;
-    } else if (e.key === "Escape") {
-      selected.clear();
-      updateSelection();
-    } else if (/^(Digit|Numpad)[1-9]$/.test(code) && nums.length) {
-      const i = +code.slice(-1) - 1;
-      if (i < project.people.length) assign(nums, i);
-      else if (i === project.people.length) assignNewPerson(nums);
-      else return;
-    } else if (code === "KeyO" && nums.length) assign(nums, "other");
-    else if (code === "KeyN" && nums.length) assign(nums, "not_face");
-    else if ((e.key === "Delete" || e.key === "Backspace" || /^(Digit|Numpad)0$/.test(code)) && nums.length) assign(nums, null);
-    else if (e.key === "Enter" && nums.length === 1) openFrame(cards[nums[0] - 1]);
-    else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+    if (!cards || e.ctrlKey || e.metaKey || e.altKey || e.target.closest("button, input, select, textarea")) return;
+    const el = e.target.closest(".card");
+    if (!el) return;
+    const n = +el.dataset.n;
+    if (e.key === " " || e.key === "Enter") toggle(n);
+    else if (e.code === "KeyV") openFrame(cards[n - 1]);
+    else if (["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"].includes(e.key)) {
       const order = visibleCards().map((c) => c.number);
-      const cur = nums.length ? order.indexOf(nums[nums.length - 1]) : -1;
-      const next = order[Math.max(0, Math.min(order.length - 1, cur + (e.key === "ArrowRight" ? 1 : -1)))];
-      if (next === undefined) return;
-      selected = new Set([next]);
-      anchor = next;
-      updateSelection();
-      const el = cardEls.get(next);
-      if (el) { el.scrollIntoView({ block: "nearest" }); el.focus({ preventScroll: true }); }
+      const i = order.indexOf(n) + (e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : -1);
+      const next = cardEls.get(order[Math.max(0, Math.min(order.length - 1, i))]);
+      if (next) { next.focus(); next.scrollIntoView({ block: "nearest" }); }
     } else return;
     e.preventDefault();
   }

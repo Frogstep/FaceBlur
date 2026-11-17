@@ -6,10 +6,16 @@ tracker did not link, chained by position. Nothing is merged by appearance:
 the user decides who each card is. Cards are only *ordered* by appearance so
 that similar faces sit next to each other.
 
-Labels: a person index (0, 1, ...), SOMEONE_ELSE (a real face that must not be
-masked) or NOT_A_FACE (a false detection). Weak detections outside any card
-are never labeled; they are masked only by spatial continuity with a labeled
-person (see identity.plan_labeled).
+The user's only choice per card is blur or not: a card is blurred when its
+label is BLUR (any label >= 0; older projects stored person indices there),
+and every other card, labeled or not, stays visible. Weak detections outside
+any card are never labeled; they are masked only by spatial continuity with a
+blurred face (see identity.plan_labeled).
+
+For masking, blurred cards are linked into tracks (chain_cards) by position
+and time only, like the tracker itself: a card that starts where and shortly
+after another one ended continues it, so gaps between them are bridged.
+Nothing is ever joined by appearance.
 """
 
 from __future__ import annotations
@@ -21,8 +27,13 @@ import numpy as np
 from .identity import Detections, _box_iou, _norm
 
 UNLABELED = -3
-NOT_A_FACE = -2
-SOMEONE_ELSE = -1
+NOT_A_FACE = -2  # older projects only: now simply "not blurred"
+SOMEONE_ELSE = -1  # older projects only: now simply "not blurred"
+BLUR = 0
+
+
+def is_blur(label: int) -> bool:
+    return label >= 0
 
 CONFIDENT = 0.5  # untracked detections at or above this score get a card
 CHAIN_GAP = 15  # frames: untracked detections this close in time and overlapping are one card
@@ -113,6 +124,42 @@ def detection_labels(dets: Detections, cards: list[Card], card_labels: list[int]
     for c, lab in zip(cards, card_labels):
         out[c.det_idx] = lab
     return out
+
+
+def chain_cards(dets: Detections, cards: list[Card], positions: list[int], fps: float,
+                max_gap_s: float = 1.0) -> list[list[int]]:
+    """Link cards (positions in `cards`) into masking tracks: a card joins the
+    track whose last face ended at most max_gap_s before it starts, in about the
+    same place (the tracker lost the face briefly). Cards that overlap in time
+    are never linked, so two faces on screen together are always two tracks."""
+    max_gap = max(1, int(round(max_gap_s * fps)))
+    tracks: list[list[int]] = []
+    ends: list[int] = []  # last detection of each track
+    for k in sorted(positions, key=lambda k: int(dets.frame[cards[k].det_idx[0]])):
+        first = int(cards[k].det_idx[0])
+        f0 = int(dets.frame[first])
+        best, best_gap = None, None
+        for t, last in enumerate(ends):
+            gap = f0 - int(dets.frame[last])
+            if 0 < gap <= max_gap and _near(dets.box[last], dets.box[first]):
+                if best_gap is None or gap < best_gap:
+                    best, best_gap = t, gap
+        if best is None:
+            tracks.append([k])
+            ends.append(int(cards[k].det_idx[-1]))
+        else:
+            tracks[best].append(k)
+            ends[best] = int(cards[k].det_idx[-1])
+    return tracks
+
+
+def _near(a, b) -> bool:
+    """Same place: overlapping boxes, or centres less than a face size apart."""
+    if _box_iou(a, b) > 0.1:
+        return True
+    size = max(a[2] - a[0], a[3] - a[1], b[2] - b[0], b[3] - b[1])
+    d = np.hypot((a[0] + a[2] - b[0] - b[2]) / 2, (a[1] + a[3] - b[1] - b[3]) / 2)
+    return bool(d < size)
 
 
 def person_refs(dets: Detections, det_idx: np.ndarray) -> np.ndarray | None:

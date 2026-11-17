@@ -1,12 +1,19 @@
 # FaceBlur
 
-Masks chosen people's faces through a whole video. Pipeline: FFmpeg decode → low-light
+Blurs the faces you choose through a whole video. Pipeline: FFmpeg decode → low-light
 enhancement (detection copy only) → SCRFD face detection + ByteTrack face tracks → **you
-label every face card** → masks from your labels (gap filling, continuity, SAM 2.1
-segmentation) → pixelate/blur → H.265 encode with audio copied → safety pass.
+click the faces to blur** → masks (gap filling, continuity; ellipses, or exact outlines with
+SAM 2.1 when you turn it on) → pixelate/blur → H.265 encode with audio copied → optional
+safety pass.
 
-Nothing is joined by appearance automatically: a **face card** is one face followed
-continuously by the tracker (by position, frame to frame), and you say who each card is.
+Both slow parts are **off by default** in the desktop app and the web app: *Precise outline
+with SAM 2* (otherwise each face gets a padded ellipse, much faster) and the *safety check*.
+
+A **face card** is one face followed continuously by the tracker (by position, frame to
+frame). Every face starts as **not blurred**; you switch on the ones to blur. One person can
+have several cards (they leave the frame, turn away, the scene changes): switch on each.
+Nothing is ever matched by appearance. For masking, blurred cards that follow each other
+in the same place within a second are joined into one track, so short gaps stay covered.
 
 ## Desktop app
 
@@ -17,32 +24,32 @@ Double-click `FaceBlur.bat` (or drag a video onto it), or:
 ```
 
 1. **File › Open** a video. Faces are detected once and cached in `work/<video>/`.
-2. **Review faces tab:** every face card shows thumbnails across it. Label each card:
-   a person to mask (**1–9**, or *New person*), **O** someone else (a real face, not
-   masked) or **N** not a face. Select several cards with Ctrl/Shift+click. One person
-   usually has several cards (they leave the frame, turn away, the scene changes).
-   Similar faces are listed next to each other; *Show: Not labeled* lists what is left.
-   **Render stays disabled until every card has a label.**
-3. **Check the timeline:** coloured bands show where each person is masked (bright = face
-   detected, dim = bridged gap, nearby weak detection or drawn box). Tick *Preview mask*
-   to see it on the frame.
+2. **Review faces tab:** every face card shows thumbnails across it, all marked *Not
+   blurred*. **Click a face to blur it**; click it again to leave it visible. Blurred faces
+   get a red frame and a red *BLURRED* tag. *Blur all* / *Blur none* switch every card;
+   *Show* lists only the blurred or the visible ones. Keys: ↑/↓ move, Space switch, Enter
+   show in the video.
+3. **Check the timeline:** the red band shows where faces are blurred (bright = face
+   detected, dim = bridged gap, nearby weak detection or drawn area). On the video,
+   blurred faces have red boxes and visible faces green ones. Tick *Preview mask* to see it.
 4. **Fix mistakes on the video:**
-   - click a face box → relabel its whole card, or *Not this person* (this frame or the
-     whole track)
-   - drag a rectangle → *Mask this area* for a person; SAM 2 tracks it from there
-5. **Render** (Ctrl+R). The safety check runs afterwards; frames where a masked face may
-   still be recognizable are listed and marked red on the timeline. Fix them and render again.
+   - click a face box → blur that face or not, or *Don't blur here* (this frame, or while
+     the face is followed continuously)
+   - drag a rectangle → *Blur this area* (with SAM 2 on, it tracks the area from there)
+5. **Render** (Ctrl+R). If *Run safety check after rendering* is ticked, the check runs
+   afterwards; frames where a blurred face may still be recognizable are listed and marked
+   red on the timeline. Fix them and render again.
 
-Weak detections that belong to no card (very dark, blurred, turned away) are masked only
-where a labeled person's face was within the last or next second.
+Weak detections that belong to no card (very dark, blurred, turned away) are blurred only
+where a blurred face was within the last or next second.
 
 Keys on the video (click it first): Space play/pause, ←/→ one frame, Shift+←/→ one second,
 Home/End.
 
 Everything you choose is saved automatically (about a second after each change) next to the
 video as `<video>.faceblur.json`. Reopening the video or project restores it, with the last
-output and its safety report. Projects from before the face review keep their settings and
-corrections, but their faces need labeling again.
+output and its safety report. In projects from earlier versions, faces labeled as a person
+are blurred and every other face (someone else, not a face, no label) is not.
 
 ## Command line
 
@@ -50,15 +57,12 @@ corrections, but their faces need labeling again.
 .venv/Scripts/python -m faceblur pick input.mp4
 ```
 
-Open `work/input/faces.jpg` (one numbered row per face card), then label **every** card:
+Open `work/input/faces.jpg` (one numbered row per face card), then list the cards to blur;
+every other face stays visible:
 
 ```bash
-.venv/Scripts/python -m faceblur render input.mp4 --face 1,2,5 --face 3,4 --other 6 --not-face 7
+.venv/Scripts/python -m faceblur render input.mp4 --blur 1,2,5
 ```
-
-`--face` once per person to mask; `--other` real faces that stay visible; `--not-face`
-false detections; `--rest other` (or `--rest not-face`) labels every card you did not list.
-Rendering is refused while any card has no label.
 
 A project saved from the app (including its corrections) renders with:
 
@@ -68,7 +72,7 @@ A project saved from the app (including its corrections) renders with:
 
 Output: `input_masked.mp4`. Options: `--style pixelate|blur|fill`, `--strength 1.5`
 (coarser), `--pad 0.4` (bigger margin), `--debug` (overlay video in `work/input/debug.mp4`),
-`--no-sam` (ellipse masks only), `--no-check`.
+`--sam` (exact outlines with SAM 2; new projects use ellipses), `--no-sam`, `--no-check`.
 
 The safety pass runs automatically after rendering (exit code 2 if something is flagged).
 To run it again on its own:
@@ -93,9 +97,10 @@ access token (kept in `server_token.txt`) and a sign-in link per address.
 **Web app:** open the printed sign-in link (`http://<address>:8765/#token=…`) once in any
 browser on your network, a phone's included; it stays signed in. Then: drop or choose a video
 (large files upload in parts; if the connection drops, choose the same file again and it
-continues) → wait for the face detection → label every face card (same keys as the desktop app:
-**1–9** a person, **O** someone else, **N** not a face; *View* shows the card on the video) →
-set the mask style → **Render** → play or download the result and check the safety report.
+continues) → wait for the face detection → **click the faces to blur** (click again to leave
+one visible; *View* shows a face on the video) → set the mask style → **Render** → play or
+download the result. Under *Settings* you can turn on SAM 2 and the safety check (both off by
+default, per video); with the check on, the result page lists the flagged frames.
 Chrome and Edge play the H.265 result in the page; other browsers may only download it.
 The web app is in English and Russian: it follows the browser's language, and the switch in
 the top bar changes it (remembered per browser).
@@ -105,9 +110,9 @@ interactive documentation at `http://<address>:8765/docs` (*Authorize* with the 
 `POST /api/v1/jobs` with the video as the request body (or multipart field `file`), or a
 resumable upload (`POST /api/v1/uploads`, then `PATCH /api/v1/jobs/{id}/upload` chunks with
 `Upload-Offset`) → poll `GET /api/v1/jobs/{id}` until `status` is `review` → `GET …/cards`
-(thumbnails; `…/frames/{n}.jpg` for whole frames with numbered boxes) → `PUT …/people` and
-`PUT …/labels` (`{"labels": {"1": 0, "4": "other", "7": "not_face"}, "rest": "other"}`) →
-`POST …/render` → poll until `done` → `GET …/result` (resumable download) and `GET …/safety`.
+(each with `blur: false` at first; `…/frames/{n}.jpg` for whole frames with numbered boxes)
+→ `PATCH …/blur` (`{"cards": {"1": true, "4": true}}`; or `PUT …/blur` with `{"blur": [1, 4]}`
+to set exactly those) → `POST …/render` → poll until `done` → `GET …/result` (resumable download) and `GET …/safety`.
 
 Each upload gets its own folder in `jobs/` holding an ordinary project file, so a job can also
 be opened in the desktop app (`faceblur gui jobs/<id>/project.faceblur.json`). Jobs untouched

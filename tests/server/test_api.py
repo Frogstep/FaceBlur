@@ -1,5 +1,5 @@
 """Web API tests. The face scan and the render are replaced by fakes (no models,
-no GPU); everything else is real: uploads, ffprobe, face cards, labels,
+no GPU); everything else is real: uploads, ffprobe, face cards, blur choice,
 thumbnails and frames (FFmpeg), the job store and the worker.
 
 The video is the first 20 frames of the test video (_DSG0777.mp4, see
@@ -140,11 +140,11 @@ def test_full_flow(env, sample_video):
     jid = upload(client, sample_video)
     s = wait(client, jid, "review")
     assert s["video"]["frames"] == FRAMES and s["video"]["width"] == WIDTH
-    assert s["cards"] == {"total": 3, "unlabeled": 3}
+    assert s["cards"] == {"total": 3, "blurred": 0}
 
     cards = client.get(f"{API}/jobs/{jid}/cards", headers=H).json()
     assert [c["number"] for c in cards] == [1, 2, 3]
-    assert all(c["label"] is None for c in cards)
+    assert not any(c["blur"] for c in cards)  # every face starts as not blurred
     big = sorted(cards, key=lambda c: -c["frames"])
     r = client.get(cards[0]["thumbs"][0], headers=H)
     assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg" and r.content[:2] == b"\xff\xd8"
@@ -152,28 +152,27 @@ def test_full_flow(env, sample_video):
     assert r.status_code == 200 and r.content[:2] == b"\xff\xd8"
     assert client.get(f"{API}/jobs/{jid}/frames/999.jpg", headers=H).status_code == 404
 
-    # render is refused while cards are unlabeled
+    # nothing to blur yet: render is refused
     r = client.post(f"{API}/jobs/{jid}/render", headers=H)
-    assert r.status_code == 409 and r.json()["detail"]["unlabeled"] == [1, 2, 3]
+    assert r.status_code == 409 and "no face is marked to blur" in r.json()["detail"]
 
-    # a person must exist before a card is labeled with them
-    r = client.put(f"{API}/jobs/{jid}/labels", json={"labels": {str(big[0]["number"]): 0}}, headers=H)
-    assert r.status_code == 422
-    assert client.put(f"{API}/jobs/{jid}/people", json=[{"name": "Anna"}], headers=H).status_code == 200
-    r = client.put(f"{API}/jobs/{jid}/labels", json={"labels": {str(big[0]["number"]): 0}}, headers=H)
-    assert r.json()["unlabeled"] == sorted(c["number"] for c in big[1:])
-    r = client.put(f"{API}/jobs/{jid}/labels", json={"labels": {"99": 0}}, headers=H)
-    assert r.status_code == 422
-    r = client.put(f"{API}/jobs/{jid}/labels", json={"rest": "other"}, headers=H)
-    assert r.json()["unlabeled"] == []
+    # click, click, click: blur two faces, then change the mind about one
+    b0, b1 = str(big[0]["number"]), str(big[1]["number"])
+    r = client.patch(f"{API}/jobs/{jid}/blur", json={"cards": {b0: True, b1: True}}, headers=H)
+    assert r.status_code == 200 and r.json()["blur"] == sorted([int(b0), int(b1)])
+    r = client.patch(f"{API}/jobs/{jid}/blur", json={"cards": {b1: False}}, headers=H)
+    assert r.json()["blur"] == [int(b0)]
+    assert client.patch(f"{API}/jobs/{jid}/blur", json={"cards": {"99": True}}, headers=H).status_code == 422
+    cards = client.get(f"{API}/jobs/{jid}/cards", headers=H).json()
+    assert [c["number"] for c in cards if c["blur"]] == [int(b0)]
+    assert client.get(f"{API}/jobs/{jid}", headers=H).json()["cards"] == {"total": 3, "blurred": 1}
 
-    # removing a person who still has cards is refused
-    assert client.put(f"{API}/jobs/{jid}/people", json=[], headers=H).status_code == 409
+    # PUT sets exactly the given cards
+    assert client.put(f"{API}/jobs/{jid}/blur", json={"blur": [1, 2, 3]}, headers=H).json()["blur"] == [1, 2, 3]
+    assert client.put(f"{API}/jobs/{jid}/blur", json={"blur": [int(b0)]}, headers=H).json()["blur"] == [int(b0)]
 
     proj = client.get(f"{API}/jobs/{jid}/project", headers=H).json()
-    assert proj["people"] == [{"name": "Anna"}]
-    assert proj["labels"][str(big[0]["number"])] == 0
-    assert sorted(v for v in proj["labels"].values() if v != 0) == ["other", "other"]
+    assert proj["blur"] == [int(b0)] and proj["settings"]["style"] == "pixelate"
 
     r = client.patch(f"{API}/jobs/{jid}/settings", json={"style": "blur", "pad": 0.4}, headers=H)
     assert r.json()["style"] == "blur" and r.json()["pad"] == 0.4 and r.json()["strength"] == 1.0
@@ -183,7 +182,7 @@ def test_full_flow(env, sample_video):
     from faceblur.project import Project
 
     p = Project.load(store.get(jid).project_path)
-    assert p.settings.style == "blur" and len(p.labels) == 3
+    assert p.settings.style == "blur" and [lab.label for lab in p.labels] == [0]
 
     assert client.post(f"{API}/jobs/{jid}/render", headers=H).status_code == 202
     s = wait(client, jid, "done")
@@ -231,8 +230,7 @@ def test_cancel_render_and_rescan(env, sample_video):
     client, store, ops = env
     jid = upload(client, sample_video)
     wait(client, jid, "review")
-    client.put(f"{API}/jobs/{jid}/people", json=[{"name": "A"}], headers=H)
-    client.put(f"{API}/jobs/{jid}/labels", json={"labels": {"1": 0}, "rest": "not_face"}, headers=H)
+    client.patch(f"{API}/jobs/{jid}/blur", json={"cards": {"1": True}}, headers=H)
     ops.render_delay = 10
     assert client.post(f"{API}/jobs/{jid}/render", headers=H).status_code == 202
     wait(client, jid, "rendering")
@@ -243,10 +241,10 @@ def test_cancel_render_and_rescan(env, sample_video):
     assert "cancelled" in s["error"]
     assert s["result"] is None
 
-    # detect again: labels are cleared
+    # detect again: the choice of faces to blur is cleared
     assert client.post(f"{API}/jobs/{jid}/scan", headers=H).status_code == 200
     s = wait(client, jid, "review")
-    assert s["cards"]["unlabeled"] == 3
+    assert s["cards"] == {"total": 3, "blurred": 0}
 
 
 def test_restart_marks_running_jobs_failed(tmp_path, sample_video):
@@ -381,8 +379,7 @@ def test_result_inline_for_video_player(env, sample_video):
     client, *_ = env
     jid = upload(client, sample_video)
     wait(client, jid, "review")
-    client.put(f"{API}/jobs/{jid}/people", json=[{"name": "A"}], headers=H)
-    client.put(f"{API}/jobs/{jid}/labels", json={"labels": {"1": 0}, "rest": "other"}, headers=H)
+    client.patch(f"{API}/jobs/{jid}/blur", json={"cards": {"1": True}}, headers=H)
     client.post(f"{API}/jobs/{jid}/render", headers=H)
     wait(client, jid, "done")
     r = client.get(f"{API}/jobs/{jid}/result", params={"download": "false"}, headers=H)
@@ -404,8 +401,7 @@ def env_history(tmp_path):
 def rendered_job(client, video) -> str:
     jid = upload(client, video)
     wait(client, jid, "review")
-    client.put(f"{API}/jobs/{jid}/people", json=[{"name": "A"}], headers=H)
-    client.put(f"{API}/jobs/{jid}/labels", json={"labels": {"1": 0}, "rest": "other"}, headers=H)
+    client.patch(f"{API}/jobs/{jid}/blur", json={"cards": {"1": True}}, headers=H)
     client.post(f"{API}/jobs/{jid}/render", headers=H)
     wait(client, jid, "done")
     return jid
@@ -479,3 +475,53 @@ def test_history_move_failing_halfway_puts_files_back(env_history, sample_video,
     assert job.video.read_bytes() == sample_video.read_bytes()  # moved first, then put back
     assert job.result.is_file() and (job.dir / "job.json").is_file()
     assert not any(history.iterdir())
+
+
+# ---------------------------------------------------------------- defaults
+
+def test_sam_and_safety_check_are_off_by_default(env, sample_video):
+    client, *_ = env
+    jid = upload(client, sample_video)
+    wait(client, jid, "review")
+    s = client.get(f"{API}/jobs/{jid}/project", headers=H).json()["settings"]
+    assert s["use_sam"] is False and s["safety_check"] is False
+    r = client.patch(f"{API}/jobs/{jid}/settings", json={"use_sam": True, "safety_check": True}, headers=H)
+    assert r.json()["use_sam"] is True and r.json()["safety_check"] is True
+
+
+def test_worker_runs_the_safety_check_only_when_it_is_on(tmp_path, sample_video, monkeypatch):
+    """The real worker step, with the slow render and check replaced."""
+    import faceblur.pipeline as pl
+    from faceblur.pipeline import RenderResult
+    from faceblur.server.worker import PipelineOps
+
+    calls = []
+
+    def fake_render(project, analysis, **kw):
+        Path(project.output).write_bytes(b"video")
+        return RenderResult(Path(project.output), FRAMES, 0, {}, 50.0, analysis.wd / "render_log.json")
+
+    def fake_check(masked, refs, wd, **kw):
+        calls.append(masked)
+        return {"flagged": [{"frame": 1}]}
+
+    monkeypatch.setattr(pl, "render", fake_render)
+    monkeypatch.setattr(pl, "safety_check", fake_check)
+    store = JobStore(tmp_path / "jobs")
+    job = store.create("a.mp4", ".mp4")
+    shutil.copy(sample_video, job.video)
+    FakeOps().scan(job, lambda *a: None, lambda: False)
+    job.update(status="review", scanned=True)
+    with job.lock:
+        p = job.load_project()
+        a = job.analysis()
+        a.set_blur(p, [0], True)
+        job.save_project(p)
+    info = PipelineOps().render(job, lambda *a: None, lambda: False)
+    assert info["safety"] == "off" and calls == []
+    with job.lock:
+        p = job.load_project()
+        p.settings.safety_check = True
+        job.save_project(p)
+    info = PipelineOps().render(job, lambda *a: None, lambda: False)
+    assert info["safety"] == "done" and info["flagged"] == 1 and len(calls) == 1

@@ -1,9 +1,9 @@
 """FaceBlur main window.
 
-Workflow: open a video -> faces are detected (cached) and shown as face cards
--> the user labels every card (a person, someone else, or not a face) in the
-Review tab -> fix individual frames (click a box: "not this person"; drag a
-box: "mask here too") -> render -> review the safety check.
+Workflow: open a video -> faces are detected (cached) and shown as face cards,
+all not blurred -> the user clicks the faces to blur in the Review tab -> fix
+individual frames (click a box: "don't blur here"; drag a box: "blur this
+area") -> render -> review the safety check.
 """
 
 from __future__ import annotations
@@ -22,13 +22,12 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
 
 from ..identity import Cancelled  # noqa: F401  (re-exported for workers)
 from ..pipeline import Analysis, card_thumbnails, load_target_refs, render, safety_check
-from ..project import Exclusion, Manual, Person, Project
-from ..review import NOT_A_FACE, SOMEONE_ELSE, UNLABELED
+from ..project import Exclusion, Manual, Project
 from ..video_io import FrameGrabber, probe
 from . import i18n
 from .i18n import HELP_EN, LANGUAGES, tr, trn
-from .review_tab import ReviewPanel, label_color
-from .widgets import EXCLUDED_COLOR, OTHER_COLOR, Overlay, Timeline, VideoView, person_color
+from .review_tab import ReviewPanel
+from .widgets import BLUR_COLOR, EXCLUDED_COLOR, KEEP_COLOR, OTHER_COLOR, Overlay, Timeline, VideoView
 from .workers import Player, Task
 
 VIDEO_EXTS = "*.mp4 *.mov *.mkv *.avi *.m4v *.webm *.mts *.m2ts *.wmv"
@@ -58,9 +57,8 @@ class MainWindow(QMainWindow):
         self.info = None
         self.frame = 0
         self.plans = []
-        self.plan_people: list[int] = []
         self.excluded: set[int] = set()
-        self.card_labels: list[int] = []  # the user's label per face card
+        self.blurred: list[bool] = []  # per face card: marked to blur
         self.flagged: list[dict] = []
         self.dirty = False
         self.task: Task | None = None
@@ -148,16 +146,15 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.preview_cb)
         bar.addWidget(self.boxes_cb)
         lv.addLayout(bar)
-        hint = QLabel(tr("Click a face box to choose who it is or to exclude it. "
-                         "Drag a rectangle to mask an area the detector missed."))
+        hint = QLabel(tr("Click a face box to blur it or leave it visible. "
+                         "Drag a rectangle to blur an area the detector missed."))
         hint.setStyleSheet("color: #999;")
         hint.setWordWrap(True)
         lv.addWidget(hint)
         self.tabs = QTabWidget()
         self.tabs.addTab(left, tr("Video"))
         self.review = ReviewPanel()
-        self.review.labelCards.connect(self.label_cards)
-        self.review.newPersonFor.connect(self._new_person_for)
+        self.review.blurCards.connect(self.set_blur)
         self.review.jump.connect(self._jump_from_review)
         self.tabs.addTab(self.review, tr("Review faces"))
         split.addWidget(self.tabs)
@@ -166,16 +163,6 @@ class MainWindow(QMainWindow):
         side = QWidget()
         sv = QVBoxLayout(side)
         sv.setContentsMargins(6, 6, 6, 6)
-
-        # people
-        g = QGroupBox(tr("People to mask"))
-        self.people_box = QVBoxLayout(g)
-        self.people_rows = QVBoxLayout()
-        self.people_box.addLayout(self.people_rows)
-        add = QPushButton(tr("Add person"))
-        add.clicked.connect(lambda: self._add_person())
-        self.people_box.addWidget(add)
-        sv.addWidget(g)
 
         # face review summary (the cards themselves are in the Review faces tab)
         g = QGroupBox(tr("Face review"))
@@ -200,7 +187,7 @@ class MainWindow(QMainWindow):
         self.pad_spin = QDoubleSpinBox(minimum=0.0, maximum=1.5, singleStep=0.05, value=0.3)
         self.pad_spin.setToolTip(tr("Extra margin around each face box"))
         self.sam_cb = QCheckBox(tr("Precise outline with SAM 2 (slower)"))
-        self.sam_cb.setChecked(True)
+        self.sam_cb.setChecked(False)
         form.addRow(tr("Style"), self.style_combo)
         form.addRow(tr("Strength"), self.strength_spin)
         form.addRow(tr("Margin"), self.pad_spin)
@@ -376,11 +363,8 @@ class MainWindow(QMainWindow):
     def _set_enabled(self) -> None:
         busy = self.task is not None
         ready = self.analysis is not None
-        n_un = sum(1 for lab in self.card_labels if lab == UNLABELED) if ready else 0
-        self.render_btn.setEnabled(ready and not busy and not n_un)
-        self.render_btn.setText(tr("Label {n} more {cards} to render", n=n_un,
-                                   cards=trn(n_un, "face card", "face cards")) if n_un
-                                else tr("Render  (Ctrl+R)"))
+        self.render_btn.setEnabled(ready and not busy)
+        self.render_btn.setText(tr("Render  (Ctrl+R)"))
         self.device_combo.setEnabled(not busy)  # never switch device in the middle of a job
         self.cancel_btn.setEnabled(busy)
         self.view.drawing_enabled = ready and not busy
@@ -441,14 +425,13 @@ class MainWindow(QMainWindow):
         self.project, self.info, self.analysis = project, info, None
         self.grabber = FrameGrabber(info)
         self.out_grabber = None
-        self.frame, self.plans, self.flagged, self.card_labels = 0, [], [], []
+        self.frame, self.plans, self.flagged, self.blurred = 0, [], [], []
         self.dirty = False
         self.setWindowTitle(f"FaceBlur — {Path(project.video).name}")
         self.timeline.set_length(info.num_frames, info.fps_float)
         self.timeline.set_tracks([])
         self.timeline.set_flags([])
         self._load_settings_to_ui()
-        self._rebuild_people()
         self._clear_faces(tr("Detecting faces…"))
         self.safety_list.clear()
         self.safety_label.setText(self._safety_idle_text())
@@ -476,10 +459,8 @@ class MainWindow(QMainWindow):
         self.status.setText(tr("Found {cards} in {frames} frames.", n=n, cards=trn(n, "{n} face card", "{n} face cards"),
                                frames=a.info.num_frames))
         self._recompute()
-        if a.unlabeled(self.project):
-            self.tabs.setCurrentWidget(self.review)
-            if self.review.rows:
-                self.review.select(next(k for k, lab in enumerate(self.card_labels) if lab == UNLABELED))
+        if a.cards and not any(self.blurred) and not self.project.manual:
+            self.tabs.setCurrentWidget(self.review)  # nothing chosen yet: start with the faces
             self.review.setFocus()
         else:
             self.view.setFocus()
@@ -623,131 +604,51 @@ class MainWindow(QMainWindow):
             self.out_edit.setText(path)
             self._output_changed()
 
-    # ============================================================ people
-    def _rebuild_people(self) -> None:
-        while self.people_rows.count():
-            item = self.people_rows.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)  # hide now; deleteLater only runs on the next loop pass
-                w.deleteLater()
-        if self.project is None:
-            return
-        for i, person in enumerate(self.project.people):
-            row = QWidget()
-            h = QHBoxLayout(row)
-            h.setContentsMargins(0, 0, 0, 0)
-            sw = QLabel()
-            sw.setFixedSize(14, 14)
-            sw.setStyleSheet(f"background: {person_color(i).name()}; border-radius: 3px;")
-            name = QLineEdit(person.name)
-            name.editingFinished.connect(lambda i=i, w=name: self._rename_person(i, w.text()))
-            n_cards = sum(1 for lab in self.card_labels if lab == i)
-            cards = trn(n_cards, "{n} card", "{n} cards")
-            n_manual = sum(1 for m in self.project.manual if m.person == i)
-            info = QLabel(cards + (trn(n_manual, ", {n} drawn box", ", {n} drawn boxes") if n_manual else ""))
-            info.setStyleSheet("color: #aaa;")
-            info.setWordWrap(True)
-            rm = QToolButton(text="✕")
-            rm.setToolTip(tr("Remove this person"))
-            rm.clicked.connect(lambda _=False, i=i: self._remove_person(i))
-            h.addWidget(sw)
-            h.addWidget(name, 1)
-            h.addWidget(info)
-            h.addWidget(rm)
-            self.people_rows.addWidget(row)
-        if not self.project.people:
-            lab = QLabel(tr("Nobody is masked yet. Label face cards in the\nReview faces tab, or click a face in the video."))
-            lab.setStyleSheet("color: #aaa;")
-            self.people_rows.addWidget(lab)
-
-    def _add_person(self) -> int:
-        if self.project is None:
-            return -1
-        used = {p.name for p in self.project.people}
-        k = 1
-        while tr("Person {k}", k=k) in used:
-            k += 1
-        self.project.people.append(Person(tr("Person {k}", k=k)))
-        self._people_changed()
-        return len(self.project.people) - 1
-
-    def _rename_person(self, i: int, name: str) -> None:
-        name = name.strip()
-        if name and self.project.people[i].name != name:
-            self.project.people[i].name = name
-            self._people_changed()
-
-    def _remove_person(self, i: int) -> None:
-        n_manual = sum(1 for m in self.project.manual if m.person == i)
-        n_cards = sum(1 for lab in self.card_labels if lab == i)
-        if (n_manual or n_cards) and QMessageBox.question(
-                self, tr("Remove person"),
-                tr("Remove {name}? Their {n_cards} face card(s) become unlabeled again and {n_manual} drawn box(es) "
-                   "are removed.", name=self.project.people[i].name, n_cards=n_cards, n_manual=n_manual)) \
-                != QMessageBox.StandardButton.Yes:
-            return
-        del self.project.people[i]
-        # labels: this person's cards become unlabeled, later people move up one
-        self.project.labels = [lab for lab in self.project.labels if lab.label != i]
-        for lab in self.project.labels:
-            if lab.label > i:
-                lab.label -= 1
-        self.project.manual = [m for m in self.project.manual if m.person != i]
-        for m in self.project.manual:
-            if m.person > i:
-                m.person -= 1
-        self._people_changed()
-
-    def label_cards(self, cards: list[int], label: int) -> None:
-        """Label face cards (positions in analysis.cards): a person index,
-        SOMEONE_ELSE, NOT_A_FACE or UNLABELED."""
+    # ============================================================ blur choice
+    def set_blur(self, cards: list[int], blur: bool) -> None:
+        """Mark face cards (positions in analysis.cards) to blur, or not."""
         if self.analysis is None:
             return
-        for k in cards:
-            self.analysis.set_label(self.project, k, label)
-        self.card_labels = self.analysis.card_labels(self.project)
-        self._people_changed()
-
-    def _new_person_for(self, cards: list[int]) -> None:
-        self.label_cards(cards, self._add_person())
+        self.analysis.set_blur(self.project, cards, blur)
+        self._blur_changed()
 
     def _jump_from_review(self, frame: int) -> None:
         self.tabs.setCurrentIndex(0)
         self.seek(frame)
         self.view.setFocus()
 
-    def _people_changed(self) -> None:
+    def _blur_changed(self) -> None:
         self._mark_dirty()
         if self.analysis is not None:
-            self.card_labels = self.analysis.card_labels(self.project)
-        self._rebuild_people()
+            self.blurred = self.analysis.blurred(self.project)
         self._refresh_review()
         self._schedule_recompute()
 
     # ============================================================ face review
     def _clear_faces(self, note: str) -> None:
         self.faces_note.setText(note)
-        self.card_labels = []
+        self.blurred = []
         self.review.set_cards([], None, 30.0, {})
-        self.review.set_labels([], [])
+        self.review.set_blurred([])
 
     def _refresh_review(self) -> None:
         if self.project is None or self.analysis is None:
             return
-        names = [p.name for p in self.project.people]
-        self.review.set_labels(self.card_labels, names)
-        n_un = sum(1 for lab in self.card_labels if lab == UNLABELED)
-        total = len(self.card_labels)
+        self.review.set_blurred(self.blurred)
+        n, total = sum(self.blurred), len(self.blurred)
+        n_manual = len(self.project.manual)
         if not total:
-            self.faces_note.setText(tr("No faces found. You can still drag boxes onto the video to mask areas."))
-        elif n_un:
-            self.faces_note.setText(tr("<b>{done} of {total}</b> face cards labeled. ", done=total - n_un, total=total)
-                                    + "<span style='color:#ffb020'>"
-                                    + tr("Label the remaining {n} to render.", n=n_un) + "</span>")
+            self.faces_note.setText(tr("No faces found. You can still drag boxes onto the video to blur areas."))
         else:
-            self.faces_note.setText(tr("All <b>{total}</b> face cards labeled.", total=total))
-        self.tabs.setTabText(1, tr("Review faces ({n} to label)", n=n_un) if n_un else tr("Review faces ✓"))
+            text = trn(n, "<b>{n}</b> of {total} faces will be blurred.", "<b>{n}</b> of {total} faces will be blurred.",
+                       total=total)
+            if n_manual:
+                text += " " + trn(n_manual, "Plus {n} drawn area.", "Plus {n} drawn areas.")
+            if not n and not n_manual:
+                text += "<br><span style='color:#ffb020'>" + tr("Click the faces to blur in the Review faces tab.") \
+                        + "</span>"
+            self.faces_note.setText(text)
+        self.tabs.setTabText(1, tr("Review faces ({n} blurred)", n=n))
         self._set_enabled()
 
     # ============================================================ plans
@@ -759,20 +660,17 @@ class MainWindow(QMainWindow):
         if self.analysis is None or self.project is None:
             self.show_frame()
             return
-        self.card_labels = self.analysis.card_labels(self.project)
+        self.blurred = self.analysis.blurred(self.project)
         self._refresh_review()
-        self._rebuild_people()
-        inputs, self.plans = self.analysis.plans(self.project)
-        self.plan_people = [p.index for p in inputs]
+        _, self.plans = self.analysis.plans(self.project)
         self.excluded = self.analysis.excluded(self.project)
+        # one band for everything blurred: bright = face detected, dim = bridged or drawn
         n = self.analysis.dets.num_frames
-        tracks = []
-        for pi, plan in zip(self.plan_people, self.plans):
-            levels = np.zeros(n, np.int8)
+        levels = np.zeros(n, np.int8)
+        for plan in self.plans:
             for f, s in enumerate(plan.source):
-                levels[f] = 2 if s == "det" else (1 if s else 0)
-            tracks.append((person_color(pi), levels))
-        self.timeline.set_tracks(tracks)
+                levels[f] = max(levels[f], 2 if s == "det" else (1 if s else 0))
+        self.timeline.set_tracks([(BLUR_COLOR, levels)] if self.plans else [])
         self.show_frame()
 
     def _refresh_corrections(self) -> None:
@@ -786,15 +684,14 @@ class MainWindow(QMainWindow):
                                     time=fmt_time(ex.frame / fps), frame=ex.frame, what=what))
             it.setData(Qt.ItemDataRole.UserRole, ("ex", k))
             it.setData(Qt.ItemDataRole.UserRole + 1, ex.frame)
-            it.setForeground(EXCLUDED_COLOR)
+            it.setForeground(KEEP_COLOR)
             self.corr_list.addItem(it)
         for k, m in enumerate(self.project.manual):
-            name = self.project.people[m.person].name if m.person < len(self.project.people) else "?"
-            it = QListWidgetItem(tr("▢  {time} (frame {frame}): {name}, ±{span} frames",
-                                    time=fmt_time(m.frame / fps), frame=m.frame, name=name, span=m.span))
+            it = QListWidgetItem(tr("▢  {time} (frame {frame}): blurred area, ±{span} frames",
+                                    time=fmt_time(m.frame / fps), frame=m.frame, span=m.span))
             it.setData(Qt.ItemDataRole.UserRole, ("manual", k))
             it.setData(Qt.ItemDataRole.UserRole + 1, m.frame)
-            it.setForeground(person_color(m.person))
+            it.setForeground(BLUR_COLOR)
             self.corr_list.addItem(it)
 
     def _remove_correction(self) -> None:
@@ -806,8 +703,8 @@ class MainWindow(QMainWindow):
             del self.project.exclusions[k]
         else:
             del self.project.manual[k]
-            self._rebuild_people()
         self._mark_dirty()
+        self._refresh_review()
         self._schedule_recompute()
 
     # ============================================================ frame display
@@ -856,41 +753,34 @@ class MainWindow(QMainWindow):
         if self.analysis is None or f >= self.analysis.dets.num_frames:
             return out
         dets = self.analysis.dets
-        names = [p.name for p in self.project.people]
-        role: dict[int, int] = {}
-        for pi, plan in zip(self.plan_people, self.plans):
-            for i in plan.target_dets[f]:
-                role.setdefault(i, pi)
+        target: set[int] = set()  # detections that will be blurred on this frame
+        for plan in self.plans:
+            target.update(plan.target_dets[f])
         for i in self.analysis.detections_in(f):
             i = int(i)
             k = int(self.analysis.card_of_det[i])
             tag = f"#{self.analysis.cards[k].number}" if k >= 0 else ""
-            lab = self.card_labels[k] if 0 <= k < len(self.card_labels) else UNLABELED
             box = tuple(float(v) for v in dets.box[i])
             if i in self.excluded:
-                out.append(Overlay(box, EXCLUDED_COLOR, Qt.PenStyle.DashLine, 2, tr("✕ not masked {tag}", tag=tag), "det", i))
-            elif i in role:
-                pi = role[i]
-                extra = tag if k >= 0 else tr("(nearby)")
-                out.append(Overlay(box, person_color(pi), Qt.PenStyle.SolidLine, 2.5, f"{names[pi]} {extra}", "det", i))
+                out.append(Overlay(box, KEEP_COLOR, Qt.PenStyle.DashLine, 2, tr("{tag} not blurred here", tag=tag),
+                                   "det", i))
+            elif i in target:
+                text = tr("{tag} blur", tag=tag) if k >= 0 else tr("blur (nearby)")
+                out.append(Overlay(box, BLUR_COLOR, Qt.PenStyle.SolidLine, 3, text, "det", i))
             elif k < 0:
                 out.append(Overlay(box, OTHER_COLOR, Qt.PenStyle.DotLine, 1, "", "det", i))  # weak, in no card
-            elif lab == UNLABELED:
-                out.append(Overlay(box, QColor(label_color(lab)), Qt.PenStyle.DashLine, 2, tr("{tag} ? not labeled", tag=tag),
-                                   "det", i))
             else:
-                text = tr("someone else") if lab == SOMEONE_ELSE else tr("not a face")
-                out.append(Overlay(box, QColor(label_color(lab)), Qt.PenStyle.SolidLine, 1, f"{tag} {text}", "det", i))
-        for pi, plan in zip(self.plan_people, self.plans):
+                out.append(Overlay(box, KEEP_COLOR, Qt.PenStyle.SolidLine, 1.5, tag, "det", i))
+        for plan in self.plans:
             if plan.source[f] in ("interp", "hold"):
                 for b in plan.boxes[f]:
-                    out.append(Overlay(tuple(float(v) for v in b), person_color(pi), Qt.PenStyle.DashLine, 1.5,
-                                       tr("{name} (bridged)", name=names[pi]), "bridge"))
+                    out.append(Overlay(tuple(float(v) for v in b), BLUR_COLOR, Qt.PenStyle.DashLine, 1.5,
+                                       tr("blur (bridged)"), "bridge"))
         for k, m in enumerate(self.project.manual):
-            if abs(f - m.frame) <= m.span and m.person < len(names):
+            if abs(f - m.frame) <= m.span:
                 exact = f == m.frame
-                out.append(Overlay(tuple(m.box), person_color(m.person), Qt.PenStyle.DotLine, 2.5 if exact else 1.5,
-                                   tr("{name} (drawn)", name=names[m.person]), "manual", k))
+                out.append(Overlay(tuple(m.box), BLUR_COLOR, Qt.PenStyle.DotLine, 2.5 if exact else 1.5,
+                                   tr("blur (drawn)"), "manual", k))
         return out
 
     # ============================================================ playback
@@ -932,13 +822,6 @@ class MainWindow(QMainWindow):
             self.play_btn.setText("▶")
 
     # ============================================================ corrections
-    def _person_menu(self, menu: QMenu, text: str, fn) -> None:
-        for i, p in enumerate(self.project.people):
-            a = menu.addAction(tr(text, p.name))
-            a.triggered.connect(lambda _=False, i=i: fn(i))
-        a = menu.addAction(tr(text, tr("a new person")))
-        a.triggered.connect(lambda: fn(self._add_person()))
-
     def _on_item_clicked(self, kind: str, ref: int, gpos) -> None:
         if self.project is None or self.task is not None:
             return
@@ -946,10 +829,8 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         if kind == "manual":
             m = self.project.manual[ref]
-            menu.addAction(tr("Drawn box for {name}, frame {frame} ±{span}", name=self.project.people[m.person].name,
-                              frame=m.frame, span=m.span)) \
-                .setEnabled(False)
-            a = menu.addAction(tr("Remove this drawn box"))
+            menu.addAction(tr("Drawn area, frame {frame} ±{span}", frame=m.frame, span=m.span)).setEnabled(False)
+            a = menu.addAction(tr("Remove this drawn area"))
             a.triggered.connect(lambda: self._remove_manual(ref))
             menu.exec(gpos)
             return
@@ -958,35 +839,32 @@ class MainWindow(QMainWindow):
         k = int(self.analysis.card_of_det[i])
         box = [float(v) for v in dets.box[i]]
         if i in self.excluded:
-            a = menu.addAction(tr("Mask this face again (undo “not this person”)"))
+            a = menu.addAction(tr("Blur this face here again"))
             a.triggered.connect(lambda: self._unexclude(i))
-        else:
-            is_target = any(i in plan.target_dets[self.frame] for plan in self.plans)
-            if k >= 0:
-                num = self.analysis.cards[k].number
-                sub = menu.addMenu(tr("Face card #{num} (the whole card)", num=num))
-                self._person_menu(sub, "Mask as {}", lambda pi: self.label_cards([k], pi))
-                sub.addSeparator()
-                sub.addAction(tr("Someone else (not masked)")).triggered.connect(
-                    lambda: self.label_cards([k], SOMEONE_ELSE))
-                sub.addAction(tr("Not a face")).triggered.connect(lambda: self.label_cards([k], NOT_A_FACE))
-                if self.card_labels[k] != UNLABELED:
-                    sub.addAction(tr("Clear the label")).triggered.connect(lambda: self.label_cards([k], UNLABELED))
-                sub.addSeparator()
-                sub.addAction(tr("Show this card in the review")).triggered.connect(
-                    lambda: (self.tabs.setCurrentWidget(self.review), self.review.select(k)))
-            if is_target:
-                menu.addSeparator()
-                a = menu.addAction(tr("Not this person — this frame only"))
-                a.triggered.connect(lambda: self._exclude(self.frame, box, "frame"))
-                if int(dets.track[i]) != 0:
-                    a = menu.addAction(tr("Not this person — whole track"))
-                    a.setToolTip(tr("Every frame where this face is followed continuously"))
-                    a.triggered.connect(lambda: self._exclude(self.frame, box, "track"))
+            menu.exec(gpos)
+            return
+        if k >= 0:
+            num = self.analysis.cards[k].number
+            if self.blurred[k]:
+                a = menu.addAction(tr("Don't blur face #{num}", num=num))
+                a.triggered.connect(lambda: self.set_blur([k], False))
             else:
-                menu.addSeparator()
-                sub = menu.addMenu(tr("Mask this face here too"))
-                self._person_menu(sub, "for {}", lambda pi: self._add_manual(box, pi))
+                a = menu.addAction(tr("Blur face #{num}", num=num))
+                a.triggered.connect(lambda: self.set_blur([k], True))
+            menu.addAction(tr("Show face #{num} in the list", num=num)).triggered.connect(
+                lambda: (self.tabs.setCurrentWidget(self.review), self.review.select(k)))
+        is_target = any(i in plan.target_dets[self.frame] for plan in self.plans)
+        menu.addSeparator()
+        if is_target:
+            a = menu.addAction(tr("Don't blur here — this frame only"))
+            a.triggered.connect(lambda: self._exclude(self.frame, box, "frame"))
+            if int(dets.track[i]) != 0:
+                a = menu.addAction(tr("Don't blur here — while followed continuously"))
+                a.setToolTip(tr("Every frame where this face is followed continuously"))
+                a.triggered.connect(lambda: self._exclude(self.frame, box, "track"))
+        elif k < 0 or self.blurred[k]:
+            a = menu.addAction(tr("Blur this face here too (±{n} frames)", n=self.span_spin.value()))
+            a.triggered.connect(lambda: self._add_manual(box))
         menu.exec(gpos)
 
     def _on_box_drawn(self, box: list, gpos) -> None:
@@ -994,8 +872,8 @@ class MainWindow(QMainWindow):
             return
         self._stop_player()
         menu = QMenu(self)
-        menu.addAction(tr("Mask this area (±{n} frames)", n=self.span_spin.value())).setEnabled(False)
-        self._person_menu(menu, "for {}", lambda pi: self._add_manual(box, pi))
+        a = menu.addAction(tr("Blur this area (±{n} frames)", n=self.span_spin.value()))
+        a.triggered.connect(lambda: self._add_manual(box))
         menu.exec(gpos)
 
     def _exclude(self, frame: int, box, scope: str) -> None:
@@ -1016,19 +894,16 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
         self._schedule_recompute()
 
-    def _add_manual(self, box, person: int) -> None:
-        if person < 0:
-            return
-        self.project.manual.append(Manual(self.frame, [round(float(v), 1) for v in box], person,
-                                          self.span_spin.value()))
+    def _add_manual(self, box) -> None:
+        self.project.manual.append(Manual(self.frame, [round(float(v), 1) for v in box], 0, self.span_spin.value()))
         self._mark_dirty()
-        self._rebuild_people()
+        self._refresh_review()
         self._schedule_recompute()
 
     def _remove_manual(self, k: int) -> None:
         del self.project.manual[k]
         self._mark_dirty()
-        self._rebuild_people()
+        self._refresh_review()
         self._schedule_recompute()
 
     # ============================================================ render
@@ -1120,17 +995,12 @@ class MainWindow(QMainWindow):
         if self.analysis is None or self.task is not None:
             return
         self._output_changed()
-        missing = self.analysis.unlabeled(self.project)
-        if missing:
-            QMessageBox.information(self, tr("Faces to review"),
-                                    tr("{n} face card(s) have no label yet. Every card needs one: "
-                                       "a person (masked), someone else, or not a face.", n=len(missing)))
-            self.tabs.setCurrentWidget(self.review)
-            return
         _, plans = self.analysis.plans(self.project)
         if not plans:
-            QMessageBox.information(self, tr("Nothing to mask"),
-                                    tr("No card is labeled as a person to mask, and there are no drawn boxes."))
+            QMessageBox.information(self, tr("Nothing to blur"),
+                                    tr("No face is marked to blur yet. Click the faces to blur in the "
+                                       "Review faces tab, or drag a box onto the video."))
+            self.tabs.setCurrentWidget(self.review)
             return
         out = Path(self.project.output or "")
         if not self.project.output:

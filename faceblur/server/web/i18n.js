@@ -74,7 +74,7 @@ const RU = {
   "Uploading": "Загрузка",
   "Waiting to detect faces": "Ожидает поиска лиц",
   "Detecting faces": "Поиск лиц",
-  "Label the faces": "Разметьте лица",
+  "Choose faces to blur": "Выберите лица для размытия",
   "Waiting to render": "Ожидает рендера",
   "Rendering": "Рендер",
   "Safety check": "Проверка безопасности",
@@ -89,12 +89,6 @@ const RU = {
   "Rendering was cancelled.": "Рендер отменён.",
   "The server stopped during the face scan. Start it again.": "Сервер остановился во время поиска лиц. Запустите его снова.",
   "The server stopped during the render. Start it again.": "Сервер остановился во время рендера. Запустите его снова.",
-
-  // labels
-  "No label": "Без метки",
-  "Someone else": "Кто-то другой",
-  "Not a face": "Не лицо",
-  "Person {k}": "Человек {k}",
 
   // uploads
   "{name} is {size}; the server accepts up to {max}.": "{name}: {size}, а сервер принимает до {max}.",
@@ -129,9 +123,9 @@ const RU = {
   "← Videos": "← Видео",
   "no audio": "без звука",
   "Detect again": "Найти лица заново",
-  "Discard the detections and labels and scan the video again":
-    "Сбросить найденные лица и метки и просканировать видео заново",
-  "Detect faces again? All face labels are cleared.": "Найти лица заново? Все метки лиц будут сброшены.",
+  "Discard the detected faces and the choice of faces to blur, and scan the video again":
+    "Сбросить найденные лица и выбор лиц для размытия и просканировать видео заново",
+  "Detect faces again? The choice of faces to blur is cleared.": "Найти лица заново? Выбор лиц для размытия будет сброшен.",
   "The upload stopped at {done} of {size}. Choose the same file to continue.":
     "Загрузка остановилась на {done} из {size}. Выберите тот же файл, чтобы продолжить.",
   "Choose the file": "Выбрать файл",
@@ -152,47 +146,29 @@ const RU = {
 
   // review
   "Faces": "Лица",
-  "Each card is one face followed continuously through the video. Say who every card is: a person to mask, someone else (stays visible) or not a face. One person usually has several cards. Similar faces are listed next to each other.":
-    "Каждая карточка — одно лицо, которое непрерывно отслеживается в видео. Укажите, кто на каждой карточке: человек, которого нужно скрыть, кто-то другой (остаётся видимым) или не лицо. У одного человека обычно несколько карточек. Похожие лица стоят рядом.",
-  "Keys:": "Клавиши:",
-  "person": "человек",
-  "someone else": "кто-то другой",
-  "not a face": "не лицо",
-  "clear": "очистить",
-  "select all": "выбрать все",
-  "view frame": "показать кадр",
-  "All cards": "Все карточки",
-  "Not labeled": "Не размечено",
-  "Rest:": "Остальные:",
-  "Label every card without a label as someone else": "Пометить все неразмеченные карточки как «Кто-то другой»",
-  "Label every card without a label as not a face": "Пометить все неразмеченные карточки как «Не лицо»",
-  "People to mask:": "Кого скрыть:",
-  "Click to rename": "Нажмите, чтобы переименовать",
-  "Name": "Имя",
-  "Remove (only when no card is labeled with this person)": "Удалить (только если ни одна карточка не помечена этим человеком)",
-  "+ Person": "+ Человек",
-  "Key {k}": "Клавиша {k}",
-  "New person": "Новый человек",
-  "Clear": "Очистить",
-  "Every card has a label.": "У всех карточек есть метка.",
+  "Every face stays visible until you choose to blur it. Click a face to blur it; click it again to leave it visible.":
+    "Все лица остаются видимыми, пока вы не решите их размыть. Нажмите на лицо, чтобы размыть его; нажмите ещё раз, чтобы оставить его видимым.",
+  "Show": "Показать",
+  "All faces": "Все лица",
+  "Blurred": "Размыто",
+  "Not blurred": "Не размыто",
+  "Blur all": "Размыть все",
+  "Blur none": "Убрать размытие",
+  "Remove the blur from all {n} faces?": "Убрать размытие со всех лиц ({n})?",
   "No faces were found in this video.": "В этом видео лица не найдены.",
-  "Select card {n}": "Выбрать карточку {n}",
-  "View on the video (Enter)": "Показать на видео (Enter)",
+  "No face is blurred yet.": "Пока ни одно лицо не размыто.",
+  "Every face is blurred.": "Размыты все лица.",
+  "Face #{n}: blurred": "Лицо #{n}: размыто",
+  "Face #{n}: not blurred": "Лицо #{n}: не размыто",
+  "Show this face on the video": "Показать это лицо на видео",
   "View": "Смотреть",
-  "Select cards, then:": "Выберите карточки, затем:",
-  "All {n} cards labeled": "Все карточки размечены ({n})",
-  "No faces to mask.": "Нечего скрывать: лица не найдены.",
-  "Label every card first ({n} left).": "Сначала разметьте все карточки (осталось {n}).",
-  "Label at least one card as a person to mask.": "Пометьте хотя бы одну карточку как человека, которого нужно скрыть.",
+  "No faces to blur.": "Нет лиц для размытия.",
+  "Click the faces you want to blur.": "Нажмите на лица, которые нужно размыть.",
   "Render": "Рендер",
   "Render again": "Рендер заново",
-  "Masks every person's cards, then runs the safety check.":
-    "Скрывает лица отмеченных людей, затем запускает проверку безопасности.",
-  "Every card already has a label.": "У всех карточек уже есть метка.",
-  "Label the {n} card(s) without a label as “{label}”?": "Пометить неразмеченные карточки ({n}) как «{label}»?",
 
   // settings
-  "Mask": "Маска",
+  "Settings": "Настройки",
   "Style": "Стиль",
   "Pixelate": "Пикселизация",
   "Blur": "Размытие",
@@ -200,27 +176,35 @@ const RU = {
   "Strength": "Сила",
   "Margin around the face": "Отступ вокруг лица",
   "Exact face outline (SAM 2)": "Точный контур лица (SAM 2)",
-  "Off: ellipses, much faster": "Выкл.: эллипсы, намного быстрее",
+  "Slower. Off: ellipses, much faster": "Медленнее. Выкл.: эллипсы, намного быстрее",
+  "Run safety check after rendering": "Проверка безопасности после рендера",
+  "Looks for blurred faces that are still recognizable in the result (slower)":
+    "Ищет в результате размытые лица, которые всё ещё можно узнать (медленнее)",
+  "The safety check is off (turn it on in the settings below).": "Проверка безопасности выключена (её можно включить в настройках ниже).",
 
   // frame viewer
-  "Card #{n}": "Карточка #{n}",
+  "Face #{n}": "Лицо #{n}",
   "Frame {f} · {time}": "Кадр {f} · {time}",
   "Close": "Закрыть",
-  "◀ Card": "◀ Карточка",
-  "Card ▶": "Карточка ▶",
-  "Previous sample of this card": "Предыдущий образец этой карточки",
-  "Next sample of this card": "Следующий образец этой карточки",
-  "#{n} is:": "#{n} — это:",
-  "Boxes are numbered by card and coloured by label (yellow: no label yet).":
-    "Рамки пронумерованы по карточкам и окрашены по меткам (жёлтая — ещё без метки).",
+  "Blur #{n}": "Размыть #{n}",
+  "Don't blur #{n}": "Не размывать #{n}",
+  "◀ Earlier": "◀ Раньше",
+  "Later ▶": "Позже ▶",
+  "An earlier picture of this face": "Более ранний кадр с этим лицом",
+  "A later picture of this face": "Более поздний кадр с этим лицом",
+  "Red boxes are blurred, green boxes stay visible. The numbers are the face numbers in the list.":
+    "Красные рамки — размытые лица, зелёные — остаются видимыми. Номера совпадают с номерами лиц в списке.",
   "video frame": "кадр видео",
 };
 
 const RU_PLURAL = {
   "{n} frame": ["{n} кадр", "{n} кадра", "{n} кадров"],
-  "{n} selected:": ["Выбрана {n}:", "Выбрано {n}:", "Выбрано {n}:"],
-  "{n} of {total} cards without a label": [
-    "Без метки {n} карточка из {total}", "Без метки {n} карточки из {total}", "Без метки {n} карточек из {total}"],
+  "{n} of {total} faces blurred": ["Размыто {n} лицо из {total}", "Размыто {n} лица из {total}", "Размыто {n} лиц из {total}"],
+  "Blurs {n} face.": ["Размоет {n} лицо.", "Размоет {n} лица.", "Размоет {n} лиц."],
+  "Blurs {n} face, then runs the safety check.": [
+    "Размоет {n} лицо, затем запустит проверку безопасности.",
+    "Размоет {n} лица, затем запустит проверку безопасности.",
+    "Размоет {n} лиц, затем запустит проверку безопасности."],
   "A masked face may still be recognizable on {n} frame. Check it below; fix hard frames in the desktop app if needed.": [
     "Скрытое лицо может быть узнаваемо на {n} кадре. Проверьте его ниже; сложные кадры при необходимости исправьте в настольном приложении.",
     "Скрытое лицо может быть узнаваемо на {n} кадрах. Проверьте их ниже; сложные кадры при необходимости исправьте в настольном приложении.",

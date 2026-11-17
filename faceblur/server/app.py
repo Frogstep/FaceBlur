@@ -2,8 +2,9 @@
 `Authorization: Bearer <token>`.
 
 Flow: POST /jobs (upload) -> poll GET /jobs/{id} until status "review" ->
-GET /jobs/{id}/cards (+ thumbnails) -> PUT people and labels -> POST render ->
-poll until "done" -> GET /jobs/{id}/result.
+GET /jobs/{id}/cards (+ thumbnails) -> PATCH /jobs/{id}/blur (the cards to blur;
+every card starts as not blurred) -> POST render -> poll until "done" ->
+GET /jobs/{id}/result.
 
 Browsers (the web app at /) sign in once with POST /api/v1/session and then use
 a session cookie; state-changing requests made with the cookie must send the
@@ -12,9 +13,6 @@ header `X-FaceBlur: 1` (CSRF protection).
 Large uploads can be resumed: POST /uploads {name, size} -> PATCH
 /jobs/{id}/upload with `Upload-Offset` and the next chunk as the body, until the
 whole file is there (GET /jobs/{id}/upload says how much arrived).
-
-Labels in the API: a person index (0, 1, ... into `people`), "other" (a real
-face that stays visible), "not_face" (a false detection) or null (no label yet).
 """
 
 from __future__ import annotations
@@ -30,7 +28,7 @@ import threading
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal, Union
+from typing import Literal
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
@@ -40,8 +38,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.requests import ClientDisconnect
 
-from ..project import Person
-from ..review import NOT_A_FACE, SOMEONE_ELSE, UNLABELED
 from .images import draw_cards, jpeg
 from .jobs import BUSY, RUNNING, Job, JobStore
 from .worker import Worker
@@ -52,7 +48,6 @@ API = "/api/v1"
 COOKIE = "faceblur_session"
 WEB = Path(__file__).resolve().parent / "web"
 CHUNK = 16 << 20  # suggested chunk size for resumable uploads
-LabelValue = Union[int, Literal["other", "not_face"], None]
 
 
 class WebFiles(StaticFiles):
@@ -75,7 +70,7 @@ class Progress(BaseModel):
 
 class CardCounts(BaseModel):
     total: int
-    unlabeled: int
+    blurred: int
 
 
 class ResultInfo(BaseModel):
@@ -84,7 +79,7 @@ class ResultInfo(BaseModel):
     frames: int | None = None
     fps: float | None = None
     unmasked: int | None = None
-    safety: str | None = None  # "done" | "skipped"
+    safety: str | None = None  # "done", "off" (turned off in the settings) or "skipped" (cancelled)
     flagged: int | None = None  # frames where a masked face may still be recognizable
 
 
@@ -116,7 +111,7 @@ class CardOut(BaseModel):
     frames: int  # number of frames the face is detected on
     first_frame: int
     track: int  # tracker id, 0 = chain of untracked detections
-    label: LabelValue
+    blur: bool  # marked to blur (cards start as not blurred)
     thumbs: list[str]
     sample_frames: list[int]  # the frame of each thumbnail
 
@@ -125,8 +120,9 @@ class Settings(BaseModel):
     style: Literal["pixelate", "blur", "fill"] = "pixelate"
     strength: float = Field(1.0, ge=0.2, le=5.0)
     pad: float = Field(0.3, ge=0.0, le=1.0)
-    use_sam: bool = True
+    use_sam: bool = False  # SAM 2 face outlines (slow); off: ellipses
     cq: int = Field(19, ge=0, le=51)
+    safety_check: bool = False  # after rendering, look for blurred faces that are still recognizable
 
 
 class SettingsPatch(BaseModel):
@@ -135,26 +131,20 @@ class SettingsPatch(BaseModel):
     pad: float | None = Field(None, ge=0.0, le=1.0)
     use_sam: bool | None = None
     cq: int | None = Field(None, ge=0, le=51)
-
-
-class PersonIn(BaseModel):
-    name: str = Field(..., min_length=1, max_length=100)
+    safety_check: bool | None = None
 
 
 class ProjectOut(BaseModel):
-    people: list[PersonIn]
-    labels: dict[str, LabelValue]  # card number -> label
-    unlabeled: list[int]
+    blur: list[int]  # numbers of the cards to blur
     settings: Settings
 
 
-class LabelsIn(BaseModel):
-    labels: dict[str, LabelValue] = {}  # card number -> label (null clears it)
-    rest: Literal["other", "not_face"] | None = None  # label every card still without one
+class BlurIn(BaseModel):
+    cards: dict[str, bool]  # card number -> blur or not
 
 
-class LabelsOut(BaseModel):
-    unlabeled: list[int]
+class BlurSet(BaseModel):
+    blur: list[int]  # numbers of the cards to blur; every other card is not blurred
 
 
 class UploadIn(BaseModel):
@@ -179,28 +169,6 @@ class ConfigOut(BaseModel):
     chunk_size: int
 
 
-def label_out(v: int) -> LabelValue:
-    if v == UNLABELED:
-        return None
-    if v == SOMEONE_ELSE:
-        return "other"
-    if v == NOT_A_FACE:
-        return "not_face"
-    return int(v)
-
-
-def label_in(v: LabelValue, people: int) -> int:
-    if v is None:
-        return UNLABELED
-    if v == "other":
-        return SOMEONE_ELSE
-    if v == "not_face":
-        return NOT_A_FACE
-    if isinstance(v, int) and 0 <= v < people:
-        return v
-    raise HTTPException(422, f"label {v!r}: use a person index 0..{people - 1}, 'other', 'not_face' or null")
-
-
 # ---------------------------------------------------------------- app
 
 def create_app(store: JobStore, worker: Worker, token: str, max_upload: int = 8 << 30,
@@ -213,7 +181,7 @@ def create_app(store: JobStore, worker: Worker, token: str, max_upload: int = 8 
         worker.stop()
 
     app = FastAPI(title="FaceBlur", version="1", lifespan=lifespan,
-                  description="Upload a video, label its face cards, render, download.")
+                  description="Upload a video, choose the faces to blur, render, download.")
     bearer = HTTPBearer(auto_error=False)
     # the cookie holds a value derived from the token, not the token itself; a new
     # token (delete server_token.txt) signs every browser out
@@ -273,7 +241,7 @@ def create_app(store: JobStore, worker: Worker, token: str, max_upload: int = 8 
             a = job.analysis()
             with job.lock:
                 project = job.load_project()
-            out.cards = CardCounts(total=len(a.cards), unlabeled=len(a.unlabeled(project)))
+            out.cards = CardCounts(total=len(a.cards), blurred=sum(a.blurred(project)))
         if s.rendered and job.result.exists():
             out.result = ResultInfo(url=f"{API}/jobs/{s.id}/result", size=job.result.stat().st_size,
                                     **{k: s.render.get(k) for k in ("frames", "fps", "unmasked", "safety", "flagged")})
@@ -440,7 +408,7 @@ def create_app(store: JobStore, worker: Worker, token: str, max_upload: int = 8 
         return job_out(job, detail=False)
 
     @r.post("/jobs/{job_id}/scan", response_model=JobOut,
-            summary="Detect faces again (clears labels and corrections)")
+            summary="Detect faces again (clears the faces chosen to blur and the corrections)")
     def rescan(job_id: str):
         job = get_job(job_id)
         if job.busy:
@@ -482,15 +450,15 @@ def create_app(store: JobStore, worker: Worker, token: str, max_upload: int = 8 
         job = get_job(job_id)
         a = scanned(job)
         with job.lock:
-            labels = a.card_labels(job.load_project())
+            blurred = a.blurred(job.load_project())
         fps = a.info.fps_float
         rev = job.state.scan_rev
         out = []
-        for c, lab in zip(a.cards, labels):
+        for c, blur in zip(a.cards, blurred):
             fr = a.dets.frame[c.det_idx]
             out.append(CardOut(
                 number=c.number, start=round(float(fr.min()) / fps, 3), end=round(float(fr.max()) / fps, 3),
-                frames=len(c.det_idx), first_frame=int(fr.min()), track=c.track, label=label_out(lab),
+                frames=len(c.det_idx), first_frame=int(fr.min()), track=c.track, blur=blur,
                 thumbs=[f"{API}/jobs/{job_id}/cards/{c.number}/thumbs/{k}.jpg?r={rev}"
                         for k in range(len(c.samples))],
                 sample_frames=[int(a.dets.frame[i]) for i in c.samples]))
@@ -524,61 +492,56 @@ def create_app(store: JobStore, worker: Worker, token: str, max_upload: int = 8 
             raise HTTPException(500, "could not decode the frame")
         if boxes:
             with job.lock:
-                labels = a.card_labels(job.load_project())
-            img = draw_cards(img, a, labels, frame, w)
+                blurred = a.blurred(job.load_project())
+            img = draw_cards(img, a, blurred, frame, w)
         else:
             from .images import resize_to_width
 
             img = resize_to_width(img, w)[0]
         return Response(jpeg(img), media_type="image/jpeg")
 
-    @r.get("/jobs/{job_id}/project", response_model=ProjectOut, summary="People, labels per card, settings")
+    def blur_numbers(a, project) -> list[int]:
+        return [c.number for c, b in zip(a.cards, a.blurred(project)) if b]
+
+    def card_positions(a, numbers) -> list[int]:
+        bad = [n for n in numbers if not (str(n).isdigit() and 1 <= int(n) <= len(a.cards))]
+        if bad:
+            raise HTTPException(422, f"no card #{bad[0]} (this video has {len(a.cards)} cards)")
+        return [int(n) - 1 for n in numbers]
+
+    @r.get("/jobs/{job_id}/project", response_model=ProjectOut, summary="The cards to blur and the settings")
     def get_project(job_id: str):
         job = get_job(job_id)
         a = scanned(job)
         with job.lock:
             project = job.load_project()
-        labels = a.card_labels(project)
-        return ProjectOut(people=[PersonIn(name=p.name) for p in project.people],
-                          labels={str(c.number): label_out(l) for c, l in zip(a.cards, labels)},
-                          unlabeled=[c.number for c, l in zip(a.cards, labels) if l == UNLABELED],
-                          settings=Settings(**vars(project.settings)))
+        return ProjectOut(blur=blur_numbers(a, project), settings=Settings(**vars(project.settings)))
 
-    @r.put("/jobs/{job_id}/people", response_model=list[PersonIn],
-           summary="The people to mask; a person's index is their label")
-    def put_people(job_id: str, people: list[PersonIn]):
-        job = get_job(job_id)
-        with job.lock:
-            project = job.load_project()
-            used = {l.label for l in project.labels if l.label >= 0} | {m.person for m in project.manual}
-            if used and max(used) >= len(people):
-                raise HTTPException(409, f"person {max(used)} still has labeled cards or drawn boxes; "
-                                         f"relabel them before removing the person")
-            project.people = [Person(p.name) for p in people]
-            job.save_project(project)
-        return people
-
-    @r.put("/jobs/{job_id}/labels", response_model=LabelsOut,
-           summary="Label cards: {'labels': {'1': 0, '4': 'other', '7': 'not_face'}, 'rest': 'other'}")
-    def put_labels(job_id: str, body: LabelsIn):
+    @r.patch("/jobs/{job_id}/blur", response_model=BlurSet,
+             summary="Blur cards or not: {'cards': {'3': true, '5': false}}; returns every card to blur")
+    def patch_blur(job_id: str, body: BlurIn):
         job = get_job(job_id)
         a = scanned(job)
         with job.lock:
             project = job.load_project()
-            changes: dict[int, int] = {}
-            for key, v in body.labels.items():
-                if not key.isdigit() or not 1 <= int(key) <= len(a.cards):
-                    raise HTTPException(422, f"no card #{key} (this video has {len(a.cards)} cards)")
-                changes[int(key) - 1] = label_in(v, len(project.people))
-            for k, lab in changes.items():
-                a.set_label(project, k, lab)
-            if body.rest:
-                rest = label_in(body.rest, len(project.people))
-                for k, lab in enumerate(a.card_labels(project)):
-                    if lab == UNLABELED:
-                        a.set_label(project, k, rest)
+            changes = dict(zip(card_positions(a, list(body.cards)), body.cards.values()))
+            for blur in (True, False):
+                a.set_blur(project, [k for k, b in changes.items() if b is blur], blur)
             job.save_project(project)
-            return LabelsOut(unlabeled=a.unlabeled(project))
+            return BlurSet(blur=blur_numbers(a, project))
+
+    @r.put("/jobs/{job_id}/blur", response_model=BlurSet,
+           summary="Set exactly which cards to blur: {'blur': [1, 4]} (every other card is not blurred)")
+    def put_blur(job_id: str, body: BlurSet):
+        job = get_job(job_id)
+        a = scanned(job)
+        with job.lock:
+            project = job.load_project()
+            want = set(card_positions(a, body.blur))
+            a.set_blur(project, [k for k in range(len(a.cards)) if k not in want], False)
+            a.set_blur(project, sorted(want), True)
+            job.save_project(project)
+            return BlurSet(blur=blur_numbers(a, project))
 
     @r.patch("/jobs/{job_id}/settings", response_model=Settings, summary="Mask style and quality")
     def patch_settings(job_id: str, body: SettingsPatch):
@@ -592,7 +555,7 @@ def create_app(store: JobStore, worker: Worker, token: str, max_upload: int = 8 
 
     # ------------------------------------------------------------ render and result
     @r.post("/jobs/{job_id}/render", response_model=JobOut, status_code=202,
-            summary="Render and run the safety check (every card needs a label)")
+            summary="Render (and run the safety check if it is on); at least one card must be marked to blur")
     def start_render(job_id: str):
         job = get_job(job_id)
         if job.busy:
@@ -600,12 +563,8 @@ def create_app(store: JobStore, worker: Worker, token: str, max_upload: int = 8 
         a = scanned(job)
         with job.lock:
             project = job.load_project()
-        missing = a.unlabeled(project)
-        if missing:
-            raise HTTPException(409, {"message": f"{len(missing)} face card(s) have no label",
-                                      "unlabeled": missing})
         if not a.plans(project)[1]:
-            raise HTTPException(409, "nobody is marked to be masked: label at least one card as a person")
+            raise HTTPException(409, "no face is marked to blur")
         worker.submit(job, "render")
         return job_out(job, detail=False)
 
@@ -628,7 +587,7 @@ def create_app(store: JobStore, worker: Worker, token: str, max_upload: int = 8 
         job = get_job(job_id)
         p = job.work / "safety_report.json"
         if not p.exists():
-            raise HTTPException(404, "no safety report (not rendered yet, or the check was skipped)")
+            raise HTTPException(404, "no safety report (not rendered yet, or the check is off)")
         rep = json.loads(p.read_text(encoding="utf-8"))
         flagged = [dict(x, image=f"{API}/jobs/{job_id}/safety/{x['frame']}.jpg") for x in rep["flagged"]]
         return {"frames": rep["frames"], "threshold": rep["threshold"], "flagged": flagged}

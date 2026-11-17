@@ -1,6 +1,6 @@
 """Project file (<video>.faceblur.json, next to the video).
 
-Stores who to mask, the mask settings and the user's manual corrections, so a
+Stores which faces to blur, the mask settings and the user's manual corrections, so a
 project can be reopened, a few frames fixed and the video rendered again
 without re-detecting faces (detections are cached in work/<video>/).
 """
@@ -16,21 +16,23 @@ VERSION = 2  # 2: face cards labeled by the user (replaces automatic face groups
 
 @dataclass
 class Person:
+    """Older projects only (people are no longer used; kept so their files load)."""
     name: str
 
 
 @dataclass
 class Label:
-    """The user's label for one face card, anchored to the card's first
-    detection (frame + box) so it survives reopening the project."""
+    """A face card the user marked to blur, anchored to the card's first
+    detection (frame + box) so it survives reopening the project. Cards without
+    a label are not blurred."""
     frame: int
     box: list[float]
-    label: int  # person index, -1 = someone else (not masked), -2 = not a face
+    label: int  # 0 = blur (older projects: any person index >= 0 = blur; -1/-2 = not blurred)
 
 
 @dataclass
 class Exclusion:
-    """'Not this person': a detection that must not be masked as a target."""
+    """'Don't blur here': a detection of a blurred face that must stay visible."""
     frame: int
     box: list[float]
     scope: str = "track"  # "frame" = only this detection, "track" = its whole track
@@ -38,10 +40,10 @@ class Exclusion:
 
 @dataclass
 class Manual:
-    """'Mask here too': a user-drawn box for a person."""
+    """'Blur this area': a user-drawn box, masked for span frames around its frame."""
     frame: int
     box: list[float]
-    person: int = 0
+    person: int = 0  # older projects only (ignored)
     span: int = 15  # frames before and after
 
 
@@ -50,8 +52,9 @@ class Settings:
     style: str = "pixelate"  # pixelate / blur / fill
     strength: float = 1.0
     pad: float = 0.3
-    use_sam: bool = True
+    use_sam: bool = False  # SAM 2 face outlines (slow); off: ellipses
     cq: int = 19  # NVENC quality (lower = better)
+    safety_check: bool = False  # web server: run the safety check after rendering
 
 
 @dataclass

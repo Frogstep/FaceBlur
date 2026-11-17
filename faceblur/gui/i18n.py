@@ -48,18 +48,18 @@ def trn(n: int, one: str, many: str, **kw) -> str:
 
 HELP_EN = (
     "1. File > Open a video. Faces are detected once and cached.\n\n"
-    "2. In the Review faces tab, label every face card: a person to mask, someone else "
-    "(not masked) or not a face. A card is one face followed continuously; one person usually "
-    "has several cards. Select cards and press 1-9, O or N.\n\n"
-    "3. Scrub the timeline. Coloured bands show where each person will be masked "
-    "(bright = face detected, dim = bridged gap or drawn box).\n\n"
+    "2. In the Review faces tab, every face starts as not blurred. Click the faces you want to blur; "
+    "click again to leave a face visible. A card is one face followed continuously, so one person "
+    "can have several cards: click each of them.\n\n"
+    "3. Scrub the timeline. The red band shows where faces will be blurred "
+    "(bright = face detected, dim = bridged gap or drawn area).\n\n"
     "4. Fix mistakes on the video:\n"
-    "   • click a box → label its card, or 'Not this person' for one frame or track\n"
-    "   • drag a rectangle → 'Mask this area' for a person (SAM 2 tracks it from there)\n\n"
-    "5. Render. A safety check then looks for any masked face that is still recognizable; "
+    "   • click a box → blur that face or not, or 'Don't blur here' for one frame or track\n"
+    "   • drag a rectangle → 'Blur this area' (SAM 2 tracks it from there)\n\n"
+    "5. Render. A safety check then looks for any blurred face that is still recognizable; "
     "flagged frames are listed and marked red on the timeline.\n\n"
     "Keys: Space play/pause, ←/→ frame, Shift+←/→ one second, Home/End.\n"
-    "The project (people, settings, corrections) is saved next to the video as .faceblur.json.")
+    "The project (faces to blur, settings, corrections) is saved next to the video as .faceblur.json.")
 
 _RU = {
     # ---- transport / video side
@@ -75,9 +75,9 @@ _RU = {
     "Show the mask on the original (box-based; the render also uses SAM 2)":
         "Показать маску на оригинале (по рамкам; при рендере также используется SAM 2)",
     "Show face boxes": "Рамки лиц",
-    "Click a face box to choose who it is or to exclude it. Drag a rectangle to mask an area the detector missed.":
-        "Щёлкните по рамке лица, чтобы указать, кто это, или исключить её. "
-        "Протяните прямоугольник, чтобы скрыть область, которую пропустил детектор.",
+    "Click a face box to blur it or leave it visible. Drag a rectangle to blur an area the detector missed.":
+        "Щёлкните по рамке лица, чтобы размыть его или оставить видимым. "
+        "Протяните прямоугольник, чтобы размыть область, которую пропустил детектор.",
     "Video": "Видео",
     "Review faces": "Проверка лиц",
     "Open a video to start (File > Open, or drop a file here)":
@@ -85,8 +85,6 @@ _RU = {
     "   frame {f} / {last}": "   кадр {f} / {last}",
 
     # ---- side panel
-    "People to mask": "Кого скрывать",
-    "Add person": "Добавить человека",
     "Face review": "Проверка лиц",
     "Open a video to detect faces.": "Откройте видео, чтобы найти лица.",
     "Open the face review": "Открыть проверку лиц",
@@ -122,7 +120,6 @@ _RU = {
     "Output file": "Выходной файл",
     "Choose the output file": "Выбрать выходной файл",
     "Render  (Ctrl+R)": "Рендер  (Ctrl+R)",
-    "Label {n} more {cards} to render": "Разметьте ещё карточек: {n}",
     "Safety check": "Проверка безопасности",
     "Runs automatically after rendering.": "Запускается автоматически после рендера.",
     "Run safety check after rendering": "Проверка безопасности после рендера",
@@ -177,7 +174,7 @@ _RU = {
     "Discard cached detections and scan the whole video again?\n"
     "Face cards will change, so all face labels and corrections are cleared.":
         "Удалить кэш распознавания и заново просканировать всё видео?\n"
-        "Карточки лиц изменятся, поэтому все метки и исправления будут сброшены.",
+        "Карточки лиц изменятся, поэтому выбор лиц для размытия и исправления будут сброшены.",
     "Detecting faces: {pct}% ({done} of {total} frames)": "Поиск лиц: {pct}% (кадров: {done} из {total})",
     ", about {left} left.": ", осталось около {left}.",
     "\nYou can scrub the video meanwhile; results are cached for next time.":
@@ -195,61 +192,40 @@ _RU = {
     "Error": "Ошибка",
     "Cancelling…": "Отмена…",
 
-    # ---- people
-    "Remove this person": "Удалить этого человека",
-    "Nobody is masked yet. Label face cards in the\nReview faces tab, or click a face in the video.":
-        "Пока никто не скрыт. Разметьте карточки лиц на\nвкладке «Проверка лиц» или щёлкните по лицу в видео.",
-    "Person {k}": "Человек {k}",
-    "Remove person": "Удалить человека",
-    "Remove {name}? Their {n_cards} face card(s) become unlabeled again and {n_manual} drawn box(es) are removed.":
-        "Удалить «{name}»? Карточки лиц этого человека ({n_cards}) снова станут неразмеченными, "
-        "а нарисованные рамки ({n_manual}) будут удалены.",
-    "No faces found. You can still drag boxes onto the video to mask areas.":
-        "Лица не найдены. Вы всё равно можете рисовать рамки на видео, чтобы скрыть области.",
-    "<b>{done} of {total}</b> face cards labeled. ":
-        "Размечено карточек лиц: <b>{done} из {total}</b>. ",
-    "Label the remaining {n} to render.": "Разметьте оставшиеся ({n}), чтобы начать рендер.",
-    "All <b>{total}</b> face cards labeled.": "Все карточки лиц размечены (<b>{total}</b>).",
-    "Review faces ({n} to label)": "Проверка лиц (не размечено: {n})",
-    "Review faces ✓": "Проверка лиц ✓",
+    # ---- blur choice
+    "No faces found. You can still drag boxes onto the video to blur areas.":
+        "Лица не найдены. Вы всё равно можете рисовать рамки на видео, чтобы размыть области.",
+    "Click the faces to blur in the Review faces tab.": "Нажмите на лица, которые нужно размыть, на вкладке «Проверка лиц».",
+    "Review faces ({n} blurred)": "Проверка лиц (размыто: {n})",
 
     # ---- corrections / overlays / context menus
     "whole track": "весь трек",
     "this frame": "только этот кадр",
-    "✕  {time} (frame {frame}): not masked, {what}": "✕  {time} (кадр {frame}): не скрывать, {what}",
-    "▢  {time} (frame {frame}): {name}, ±{span} frames": "▢  {time} (кадр {frame}): {name}, ±{span} кадр.",
+    "✕  {time} (frame {frame}): not masked, {what}": "✕  {time} (кадр {frame}): не размывать, {what}",
+    "▢  {time} (frame {frame}): blurred area, ±{span} frames": "▢  {time} (кадр {frame}): размытая область, ±{span} кадр.",
     "still recognizable {s}": "всё ещё узнаваемо {s}",
-    "✕ not masked {tag}": "✕ не скрыто {tag}",
-    "(nearby)": "(рядом)",
-    "{tag} ? not labeled": "{tag} ? не размечено",
-    "someone else": "кто-то другой",
-    "not a face": "не лицо",
-    "{name} (bridged)": "{name} (заполнено)",
-    "{name} (drawn)": "{name} (нарисовано)",
-    "a new person": "нового человека",
-    "Mask as {}": "Скрыть как: {}",
-    "for {}": "для: {}",
-    "Drawn box for {name}, frame {frame} ±{span}": "Нарисованная рамка: {name}, кадр {frame} ±{span}",
-    "Remove this drawn box": "Удалить эту рамку",
-    "Mask this face again (undo “not this person”)": "Снова скрывать это лицо (отменить «не этот человек»)",
-    "Face card #{num} (the whole card)": "Карточка лица #{num} (вся карточка)",
-    "Someone else (not masked)": "Кто-то другой (не скрывать)",
-    "Not a face": "Не лицо",
-    "Clear the label": "Снять метку",
-    "Show this card in the review": "Показать карточку в проверке лиц",
-    "Not this person — this frame only": "Не этот человек — только этот кадр",
-    "Not this person — whole track": "Не этот человек — весь трек",
+    "{tag} not blurred here": "{tag} здесь не размывается",
+    "{tag} blur": "{tag} размыть",
+    "blur (nearby)": "размыть (рядом)",
+    "blur (bridged)": "размыть (заполнено)",
+    "blur (drawn)": "размыть (нарисовано)",
+    "Drawn area, frame {frame} ±{span}": "Нарисованная область, кадр {frame} ±{span}",
+    "Remove this drawn area": "Удалить эту область",
+    "Blur this face here again": "Снова размывать это лицо здесь",
+    "Blur face #{num}": "Размыть лицо #{num}",
+    "Don't blur face #{num}": "Не размывать лицо #{num}",
+    "Show face #{num} in the list": "Показать лицо #{num} в списке",
+    "Don't blur here — this frame only": "Не размывать здесь — только этот кадр",
+    "Don't blur here — while followed continuously": "Не размывать здесь — пока лицо непрерывно отслеживается",
     "Every frame where this face is followed continuously": "Все кадры, где это лицо непрерывно отслеживается",
-    "Mask this face here too": "Скрыть и это лицо здесь",
-    "Mask this area (±{n} frames)": "Скрыть эту область (±{n} кадр.)",
+    "Blur this face here too (±{n} frames)": "Размыть и здесь (±{n} кадр.)",
+    "Blur this area (±{n} frames)": "Размыть эту область (±{n} кадр.)",
 
     # ---- render / safety
-    "Faces to review": "Лица на проверку",
-    "{n} face card(s) have no label yet. Every card needs one: a person (masked), someone else, or not a face.":
-        "Карточек лиц без метки: {n}. Каждой карточке нужна метка: человек (скрыть), кто-то другой или не лицо.",
-    "Nothing to mask": "Нечего скрывать",
-    "No card is labeled as a person to mask, and there are no drawn boxes.":
-        "Ни одна карточка не отмечена как человек, которого нужно скрыть, и нарисованных рамок нет.",
+    "Nothing to blur": "Нечего размывать",
+    "No face is marked to blur yet. Click the faces to blur in the Review faces tab, or drag a box onto the video.":
+        "Ни одно лицо пока не выбрано для размытия. Нажмите на нужные лица на вкладке «Проверка лиц» "
+        "или нарисуйте рамку на видео.",
     "Output": "Выходной файл",
     "Choose an output file first.": "Сначала выберите выходной файл.",
     "The output must be a different file from the original video.":
@@ -270,50 +246,39 @@ _RU = {
     "{time} (frame {frame}) — similarity {sim}": "{time} (кадр {frame}) — сходство {sim}",
 
     # ---- review tab
-    "Not labeled": "Не размечено",
-    "{name} (masked)": "{name} (скрыть)",
-    "Double-click to show this frame in the video": "Двойной щелчок — показать этот кадр в видео",
-    "Click a card to select it (Ctrl+click: several, Shift+click: a range), then label it with a button below "
-    "or a key: <b>1–9</b> person, <b>O</b> someone else, <b>N</b> not a face, <b>Backspace</b> clear. "
-    "<b>Space</b> jumps to the next unlabeled card. Double-click a thumbnail to see it in the video. "
-    "Similar faces are listed next to each other; nothing is joined automatically.":
-        "Щёлкните по карточке, чтобы выбрать её (Ctrl+щелчок — несколько, Shift+щелчок — диапазон), затем "
-        "присвойте метку кнопкой ниже или клавишей: <b>1–9</b> человек, <b>O</b> кто-то другой, <b>N</b> не лицо, "
-        "<b>Backspace</b> снять метку. <b>Пробел</b> — к следующей неразмеченной карточке. Двойной щелчок по "
-        "миниатюре показывает её в видео. Похожие лица стоят рядом; автоматически ничего не объединяется.",
+    "Click to blur this face, or to leave it visible": "Щёлкните, чтобы размыть это лицо или оставить его видимым",
+    "Show in video": "Показать в видео",
+    "Show this face in the video": "Показать это лицо в видео",
+    "BLURRED": "РАЗМЫТО",
+    "Not blurred": "Не размыто",
+    "Every face stays visible until you choose to blur it. <b>Click a face to blur it</b>; click it again to "
+    "leave it visible. Keys: <b>↑/↓</b> move, <b>Space</b> switch, <b>Enter</b> show in the video.":
+        "Все лица остаются видимыми, пока вы не решите их размыть. <b>Щёлкните по лицу, чтобы размыть его</b>; "
+        "щёлкните ещё раз, чтобы оставить его видимым. Клавиши: <b>↑/↓</b> — переход, <b>Пробел</b> — "
+        "переключить, <b>Enter</b> — показать в видео.",
+    "Blur all": "Размыть все",
+    "Blur none": "Убрать размытие",
+    "Remove the blur from all {n} faces?": "Убрать размытие со всех лиц ({n})?",
     "Show": "Показать",
-    "All cards": "Все карточки",
-    "Masked people": "Скрываемые люди",
+    "All faces": "Все лица",
+    "Blurred": "Размыто",
     "No faces were found in this video.": "В этом видео лица не найдены.",
-    "{done} of {total} face cards labeled": "Размечено карточек лиц: {done} из {total}",
-    "{n} still need a label before rendering.": "Ещё {n} нужно разметить перед рендером.",
-    "All {total} face cards labeled.": "Все карточки лиц размечены ({total}).",
-    "Ready to render.": "Можно запускать рендер.",
-    "New person": "Новый человек",
-    "Mask the selected cards as a new person": "Скрыть выбранные карточки как нового человека",
-    "Someone else (O)": "Кто-то другой (O)",
-    "A real face that is not masked": "Настоящее лицо, которое не нужно скрывать",
-    "Not a face (N)": "Не лицо (N)",
-    "A false detection": "Ложное срабатывание",
-    "Clear": "Очистить",
-    "Remove the label": "Снять метку",
-    "frames: {n}": "кадров: {n}",
 
     # ---- help
     HELP_EN: (
         "1. Файл > Открыть видео. Лица ищутся один раз и сохраняются в кэш.\n\n"
-        "2. На вкладке «Проверка лиц» присвойте метку каждой карточке лица: человек, которого нужно скрыть, "
-        "кто-то другой (не скрывается) или не лицо. Карточка — это одно лицо, которое непрерывно отслеживается; "
-        "у одного человека обычно несколько карточек. Выберите карточки и нажмите 1-9, O или N.\n\n"
-        "3. Просмотрите временную шкалу. Цветные полосы показывают, где каждый человек будет скрыт "
-        "(ярко — лицо найдено, тускло — заполненный пропуск или нарисованная рамка).\n\n"
+        "2. На вкладке «Проверка лиц» все лица сначала не размыты. Нажмите на лица, которые нужно размыть; "
+        "повторное нажатие оставляет лицо видимым. Карточка — это одно лицо, которое непрерывно отслеживается, "
+        "поэтому у одного человека может быть несколько карточек: нажмите на каждую.\n\n"
+        "3. Просмотрите временную шкалу. Красная полоса показывает, где лица будут размыты "
+        "(ярко — лицо найдено, тускло — заполненный пропуск или нарисованная область).\n\n"
         "4. Исправляйте ошибки прямо на видео:\n"
-        "   • щелчок по рамке → метка её карточки или «Не этот человек» для кадра или трека\n"
-        "   • протяните прямоугольник → «Скрыть эту область» для человека (дальше его отслеживает SAM 2)\n\n"
-        "5. Рендер. Затем проверка безопасности ищет скрытые лица, которые всё ещё можно узнать; "
+        "   • щелчок по рамке → размыть это лицо или нет, либо «Не размывать здесь» для кадра или трека\n"
+        "   • протяните прямоугольник → «Размыть эту область» (дальше её отслеживает SAM 2)\n\n"
+        "5. Рендер. Затем проверка безопасности ищет размытые лица, которые всё ещё можно узнать; "
         "такие кадры выводятся списком и отмечаются красным на шкале.\n\n"
         "Клавиши: Пробел — воспроизведение/пауза, ←/→ — кадр, Shift+←/→ — секунда, Home/End.\n"
-        "Проект (люди, настройки, исправления) сохраняется рядом с видео как .faceblur.json."),
+        "Проект (выбор лиц, настройки, исправления) сохраняется рядом с видео как .faceblur.json."),
 }
 
 _TABLES = {"ru": _RU}
@@ -321,8 +286,14 @@ _TABLES = {"ru": _RU}
 # English singular template -> Russian forms for 1 / 2-4 / 5+
 _PLURALS = {
     "ru": {
-        "{n} card": ("{n} карточка", "{n} карточки", "{n} карточек"),
-        ", {n} drawn box": (", {n} рамка", ", {n} рамки", ", {n} рамок"),
         "{n} face card": ("{n} карточка лица", "{n} карточки лица", "{n} карточек лица"),
+        "{n} frame": ("{n} кадр", "{n} кадра", "{n} кадров"),
+        "{n} of {total} faces will be blurred": ("Будет размыто {n} лицо из {total}", "Будет размыто {n} лица из {total}",
+                                                "Будет размыто {n} лиц из {total}"),
+        "<b>{n}</b> of {total} faces will be blurred.": ("Будет размыто <b>{n}</b> лицо из {total}.",
+                                                       "Будет размыто <b>{n}</b> лица из {total}.",
+                                                       "Будет размыто <b>{n}</b> лиц из {total}."),
+        "Plus {n} drawn area.": ("Плюс {n} нарисованная область.", "Плюс {n} нарисованные области.",
+                                 "Плюс {n} нарисованных областей."),
     },
 }

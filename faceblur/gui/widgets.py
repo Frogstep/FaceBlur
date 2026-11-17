@@ -14,7 +14,9 @@ from .i18n import tr
 
 PERSON_COLORS = [QColor(c) for c in ("#3ddc84", "#4aa3ff", "#ffb020", "#e36cff", "#00d5d5", "#ff7a59")]
 OTHER_COLOR = QColor(170, 170, 170)
-EXCLUDED_COLOR = QColor("#ff4d4d")
+EXCLUDED_COLOR = QColor("#ff4d4d")  # safety flags: still recognizable in the output
+BLUR_COLOR = QColor("#ff4d4d")  # a face that will be blurred
+KEEP_COLOR = QColor("#3ddc84")  # a face that stays visible
 
 
 def person_color(i: int) -> QColor:
@@ -223,7 +225,10 @@ class Timeline(QWidget):
         if key != self._cache_key:
             self._cache = []
             for _, levels in self.tracks:
-                lv = levels[: self.n].astype(np.int64)
+                # the container's frame count can be one more than the frames that
+                # decode (and were scanned): pad the levels to the timeline length
+                lv = np.zeros(self.n, np.int64)
+                lv[: min(self.n, len(levels))] = levels[: self.n]
                 if w >= self.n:  # more pixels than frames: each column shows its frame
                     out = lv[(np.arange(w) * self.n // w).clip(0, self.n - 1)]
                 else:  # more frames than pixels: each column shows the strongest frame

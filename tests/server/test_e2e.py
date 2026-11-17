@@ -58,12 +58,13 @@ def test_whole_video_on_gpu(tmp_path, test_video):
         assert client.get(cards[0]["thumbs"][0], headers=H).status_code == 200
         assert client.get(f"{API}/jobs/{jid}/frames/{cards[0]['first_frame']}.jpg", headers=H).status_code == 200
 
-        # the card seen on the most frames is the person to mask, everyone else stays visible
+        # blur the face seen on the most frames; every other face stays visible
         biggest = max(cards, key=lambda c: c["frames"])
-        client.put(f"{API}/jobs/{jid}/people", json=[{"name": "Person 1"}], headers=H).raise_for_status()
-        r = client.put(f"{API}/jobs/{jid}/labels", json={"labels": {str(biggest["number"]): 0}, "rest": "other"},
-                       headers=H)
-        assert r.json()["unlabeled"] == []
+        r = client.patch(f"{API}/jobs/{jid}/blur", json={"cards": {str(biggest["number"]): True}}, headers=H)
+        assert r.json()["blur"] == [biggest["number"]]
+        # both are off by default; this test covers the full pipeline
+        r = client.patch(f"{API}/jobs/{jid}/settings", json={"use_sam": True, "safety_check": True}, headers=H)
+        assert r.json()["use_sam"] and r.json()["safety_check"]
         assert client.post(f"{API}/jobs/{jid}/render", headers=H).status_code == 202
 
         s = wait(client, jid, "done", timeout=1800)
