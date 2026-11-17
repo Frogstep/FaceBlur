@@ -52,6 +52,8 @@ class JobState:
     rendered: bool = False  # result.mp4 exists
     video: dict = field(default_factory=dict)  # width, height, fps, frames, duration, has_audio
     render: dict = field(default_factory=dict)  # last render: frames, fps, unmasked, sam, flagged, safety
+    upload_size: int = 0  # expected size of a resumable upload (0 = single-request upload)
+    scan_rev: int = 0  # +1 per finished face scan (cache-busting for thumbnails)
 
 
 class Job:
@@ -79,6 +81,17 @@ class Job:
     @property
     def result(self) -> Path:
         return self.dir / "result.mp4"
+
+    @property
+    def part(self) -> Path:
+        """The upload while it is incomplete."""
+        return self.video.with_name(self.video.name + ".part")
+
+    def uploaded(self) -> int:
+        try:
+            return self.part.stat().st_size
+        except FileNotFoundError:
+            return 0
 
     @property
     def busy(self) -> bool:
@@ -155,7 +168,7 @@ class JobStore:
                 log.warning("skipping %s: %s", d.name, e)
                 continue
             job = Job(self, state)
-            if state.status == "uploading":
+            if state.status == "uploading" and not state.upload_size:
                 log.info("removing unfinished upload %s", state.id)
                 shutil.rmtree(d, ignore_errors=True)
                 continue
@@ -165,12 +178,12 @@ class JobStore:
             self._jobs[state.id] = job
 
     # ------------------------------------------------------------ jobs
-    def create(self, name: str, suffix: str) -> Job:
+    def create(self, name: str, suffix: str, upload_size: int = 0) -> Job:
         jid = uuid.uuid4().hex
         now = time.time()
         safe_suffix = suffix.lower() if suffix and len(suffix) <= 6 and suffix[1:].isalnum() else ".mp4"
         state = JobState(id=jid, name=Path(name or "video").name[:200], source="source" + safe_suffix,
-                         created=now, updated=now)
+                         created=now, updated=now, upload_size=upload_size)
         job = Job(self, state)
         job.dir.mkdir(parents=True)
         job.save()

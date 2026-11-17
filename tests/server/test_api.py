@@ -2,6 +2,10 @@
 no GPU); everything else is real: uploads, ffprobe, face cards, labels,
 thumbnails and frames (FFmpeg), the job store and the worker.
 
+The video is the first 20 frames of the test video (_DSG0777.mp4, see
+conftest.py), re-encoded at 640x360 so the tests stay fast; without the test
+video an FFmpeg test pattern is used instead.
+
   .venv/Scripts/python -m pytest tests/server -q
 """
 
@@ -28,12 +32,22 @@ H = {"Authorization": f"Bearer {TOKEN}"}
 FRAMES = 20
 
 
+WIDTH, HEIGHT = 640, 360
+
+
 @pytest.fixture(scope="session")
 def sample_video(tmp_path_factory) -> Path:
+    from tests.conftest import TEST_VIDEO
+
     out = tmp_path_factory.mktemp("video") / "clip.mp4"
-    subprocess.run([_ffbin("ffmpeg"), "-v", "error", "-f", "lavfi", "-i",
-                    f"testsrc=size=320x240:rate=10:duration={FRAMES / 10}", "-pix_fmt", "yuv420p",
-                    "-c:v", "libx264", str(out)], check=True)
+    if TEST_VIDEO.is_file():
+        src = ["-i", str(TEST_VIDEO), "-frames:v", str(FRAMES), "-vf", f"scale={WIDTH}:{HEIGHT}",
+               "-c:a", "aac", "-shortest"]
+    else:
+        src = ["-f", "lavfi", "-i", f"testsrc=size={WIDTH}x{HEIGHT}:rate=10:duration={FRAMES / 10}",
+               "-frames:v", str(FRAMES)]
+    subprocess.run([_ffbin("ffmpeg"), "-v", "error", *src, "-pix_fmt", "yuv420p", "-c:v", "libx264",
+                    "-preset", "veryfast", str(out)], check=True)
     return out
 
 
@@ -125,7 +139,7 @@ def test_full_flow(env, sample_video):
     client, store, _ = env
     jid = upload(client, sample_video)
     s = wait(client, jid, "review")
-    assert s["video"]["frames"] == FRAMES and s["video"]["width"] == 320
+    assert s["video"]["frames"] == FRAMES and s["video"]["width"] == WIDTH
     assert s["cards"] == {"total": 3, "unlabeled": 3}
 
     cards = client.get(f"{API}/jobs/{jid}/cards", headers=H).json()
@@ -262,3 +276,116 @@ def test_cleanup_old_jobs(tmp_path):
     new.update(status="review")
     assert store.cleanup() == 1
     assert store.get(old.state.id) is None and store.get(new.state.id) is not None
+
+
+# ---------------------------------------------------------------- phase 3-4
+
+def test_cards_have_sample_frames_and_fresh_thumb_urls(env, sample_video):
+    client, *_ = env
+    jid = upload(client, sample_video)
+    s = wait(client, jid, "review")
+    assert s["scan_rev"] == 1
+    cards = client.get(f"{API}/jobs/{jid}/cards", headers=H).json()
+    for c in cards:
+        assert len(c["sample_frames"]) == len(c["thumbs"])
+        assert all(c["first_frame"] <= f < FRAMES for f in c["sample_frames"])
+        assert all(t.endswith("?r=1") for t in c["thumbs"])
+    client.post(f"{API}/jobs/{jid}/scan", headers=H)
+    s = wait(client, jid, "review")
+    assert s["scan_rev"] == 2
+    assert client.get(f"{API}/jobs/{jid}/cards", headers=H).json()[0]["thumbs"][0].endswith("?r=2")
+
+
+def test_browser_session_cookie(env):
+    client, *_ = env
+    assert client.post(f"{API}/session", json={"token": "wrong"}).status_code == 401
+    r = client.post(f"{API}/session", json={"token": TOKEN})
+    assert r.status_code == 204
+    cookie = r.headers["set-cookie"]
+    assert "HttpOnly" in cookie and "SameSite=strict" in cookie and TOKEN not in cookie
+    # GET works with the cookie alone
+    assert client.get(f"{API}/jobs").status_code == 200
+    assert client.get(f"{API}/config").json()["max_upload"] == 50 << 20
+    # changes need the CSRF header
+    assert client.post(f"{API}/uploads", json={"name": "a.mp4", "size": 10}).status_code == 403
+    r = client.post(f"{API}/uploads", json={"name": "a.mp4", "size": 10}, headers={"X-FaceBlur": "1"})
+    assert r.status_code == 201
+    # a wrong bearer token is refused even with a good cookie
+    assert client.get(f"{API}/jobs", headers={"Authorization": "Bearer nope"}).status_code == 401
+    assert client.delete(f"{API}/session").status_code == 204
+    assert client.get(f"{API}/jobs").status_code == 401
+
+
+def test_web_app_is_served(env):
+    client, *_ = env
+    r = client.get("/")
+    assert r.status_code == 200 and "<title>FaceBlur</title>" in r.text
+    for f in ("app.js", "style.css"):
+        assert client.get(f"/{f}").status_code == 200
+    assert client.get("/app.js").headers["cache-control"] == "no-cache"  # updates show at once
+    assert client.get("/docs").status_code == 200  # API docs still reachable
+    assert client.get(f"{API}/config").status_code == 401  # the API is not public
+
+
+def test_resumable_upload(tmp_path, sample_video):
+    data = sample_video.read_bytes()
+    third = len(data) // 3
+    store = JobStore(tmp_path / "jobs")
+    app = create_app(store, Worker(store, FakeOps()), TOKEN, max_upload=50 << 20)
+    with TestClient(app) as client:
+        r = client.post(f"{API}/uploads", json={"name": "VID_2.mp4", "size": len(data)}, headers=H)
+        assert r.status_code == 201
+        jid = r.json()["id"]
+        r = client.patch(f"{API}/jobs/{jid}/upload", content=data[:third], headers={**H, "Upload-Offset": "0"})
+        assert r.json() == {"id": jid, "status": "uploading", "offset": third, "size": len(data)}
+        # a chunk sent twice (e.g. the response was lost) is refused with the real offset
+        r = client.patch(f"{API}/jobs/{jid}/upload", content=data[:third], headers={**H, "Upload-Offset": "0"})
+        assert r.status_code == 409 and r.json()["detail"]["offset"] == third
+        s = client.get(f"{API}/jobs/{jid}", headers=H).json()
+        assert s["status"] == "uploading" and s["upload"] == {"offset": third, "size": len(data)}
+
+    # the server restarts in the middle of the upload: the upload is kept
+    store = JobStore(tmp_path / "jobs")
+    app = create_app(store, Worker(store, FakeOps()), TOKEN, max_upload=50 << 20)
+    with TestClient(app) as client:
+        assert client.get(f"{API}/jobs/{jid}/upload", headers=H).json()["offset"] == third
+        r = client.patch(f"{API}/jobs/{jid}/upload", content=data[third:2 * third], headers={**H, "Upload-Offset": str(third)})
+        assert r.json()["offset"] == 2 * third
+        # more than announced is refused
+        r = client.patch(f"{API}/jobs/{jid}/upload", content=data[2 * third:] + b"x",
+                         headers={**H, "Upload-Offset": str(2 * third)})
+        assert r.status_code == 413
+        have = client.get(f"{API}/jobs/{jid}/upload", headers=H).json()["offset"]
+        r = client.patch(f"{API}/jobs/{jid}/upload", content=data[have:], headers={**H, "Upload-Offset": str(have)})
+        assert r.status_code == 200 and r.json()["status"] in ("queued_scan", "scanning", "review")
+        s = wait(client, jid, "review")
+        assert s["video"]["size"] == len(data) and s["upload"] is None
+        assert store.get(jid).video.read_bytes() == data
+        # finished: no more chunks
+        r = client.patch(f"{API}/jobs/{jid}/upload", content=b"x", headers={**H, "Upload-Offset": str(len(data))})
+        assert r.status_code == 409
+
+
+def test_resumable_upload_limits(env):
+    client, store, _ = env
+    r = client.post(f"{API}/uploads", json={"name": "big.mp4", "size": 51 << 20}, headers=H)
+    assert r.status_code == 413
+    r = client.post(f"{API}/uploads", json={"name": "x.mp4", "size": 100}, headers=H)
+    jid = r.json()["id"]
+    r = client.patch(f"{API}/jobs/{jid}/upload", content=b"y" * 100, headers={**H, "Upload-Offset": "0"})
+    assert r.status_code == 415  # complete, but not a video: the job is removed
+    assert store.get(jid) is None
+
+
+def test_result_inline_for_video_player(env, sample_video):
+    client, *_ = env
+    jid = upload(client, sample_video)
+    wait(client, jid, "review")
+    client.put(f"{API}/jobs/{jid}/people", json=[{"name": "A"}], headers=H)
+    client.put(f"{API}/jobs/{jid}/labels", json={"labels": {"1": 0}, "rest": "other"}, headers=H)
+    client.post(f"{API}/jobs/{jid}/render", headers=H)
+    wait(client, jid, "done")
+    r = client.get(f"{API}/jobs/{jid}/result", params={"download": "false"}, headers=H)
+    assert r.headers["content-disposition"].startswith("inline")
+    r = client.get(f"{API}/jobs/{jid}/result", headers=H)
+    assert r.headers["content-disposition"].startswith("attachment")

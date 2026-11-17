@@ -124,7 +124,8 @@ class Worker(threading.Thread):
             if kind == "scan":
                 job.update(status="scanning", stage="Loading face models")
                 self.ops.scan(job, job.progress, cancel)
-                job.update(status="review", scanned=True, stage="", done=0, total=0)
+                job.update(status="review", scanned=True, scan_rev=job.state.scan_rev + 1,
+                           stage="", done=0, total=0)
             else:
                 info = self.ops.render(job, job.progress, cancel)
                 job.update(status="done", rendered=True, render=info, stage="", done=0, total=0)

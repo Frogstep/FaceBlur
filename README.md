@@ -80,28 +80,42 @@ To run it again on its own:
 Detections are cached in `work/<name>/detections.npz`; delete it (or use *File › Detect
 faces again*) to force a rescan.
 
-## Web API (for a phone app)
+## Web app and API (use it from another device)
 
 ```bash
 .venv/Scripts/python -m faceblur serve
 ```
 
 (or double-click `FaceBlurServer.bat`; `./FaceBlur.sh serve` on Linux). It listens on port 8765
-on all network addresses (`--host 127.0.0.1` for this PC only) and prints the addresses and an
-access token (kept in `server_token.txt`). Every request needs `Authorization: Bearer <token>`.
-The interactive API documentation is at `http://<address>:8765/docs` (*Authorize* with the token).
+on all network addresses (`--host 127.0.0.1` for this PC only) and prints the addresses, an
+access token (kept in `server_token.txt`) and a sign-in link per address.
 
-Flow: `POST /api/v1/jobs` with the video as the request body (or multipart field `file`) →
-poll `GET /api/v1/jobs/{id}` until `status` is `review` → `GET …/cards` (thumbnails, and
-`…/frames/{n}.jpg` for whole frames with numbered boxes) → `PUT …/people` and `PUT …/labels`
-(`{"labels": {"1": 0, "4": "other", "7": "not_face"}, "rest": "other"}`) → `POST …/render`
-→ poll until `done` → `GET …/result` (resumable download) and `GET …/safety`.
+**Web app:** open the printed sign-in link (`http://<address>:8765/#token=…`) once in any
+browser on your network, a phone's included; it stays signed in. Then: drop or choose a video
+(large files upload in parts; if the connection drops, choose the same file again and it
+continues) → wait for the face detection → label every face card (same keys as the desktop app:
+**1–9** a person, **O** someone else, **N** not a face; *View* shows the card on the video) →
+set the mask style → **Render** → play or download the result and check the safety report.
+Chrome and Edge play the H.265 result in the page; other browsers may only download it.
+
+**API** (for scripts or a native app): every request needs `Authorization: Bearer <token>`;
+interactive documentation at `http://<address>:8765/docs` (*Authorize* with the token).
+`POST /api/v1/jobs` with the video as the request body (or multipart field `file`), or a
+resumable upload (`POST /api/v1/uploads`, then `PATCH /api/v1/jobs/{id}/upload` chunks with
+`Upload-Offset`) → poll `GET /api/v1/jobs/{id}` until `status` is `review` → `GET …/cards`
+(thumbnails; `…/frames/{n}.jpg` for whole frames with numbered boxes) → `PUT …/people` and
+`PUT …/labels` (`{"labels": {"1": 0, "4": "other", "7": "not_face"}, "rest": "other"}`) →
+`POST …/render` → poll until `done` → `GET …/result` (resumable download) and `GET …/safety`.
 
 Each upload gets its own folder in `jobs/` holding an ordinary project file, so a job can also
 be opened in the desktop app (`faceblur gui jobs/<id>/project.faceblur.json`). Jobs untouched
 for 7 days are deleted (`--keep-days`). The GPU runs one job at a time; others queue.
 Keep the server on your home network or a VPN such as Tailscale: it has no HTTPS of its own.
-Tests: `.venv/Scripts/python -m pytest tests/server`.
+Deleting `server_token.txt` (and restarting) makes a new token and signs every browser out.
+
+Tests: `.venv/Scripts/python -m pytest tests/server` (seconds, no models). The end-to-end
+test runs the whole test video `_DSG0777.mp4` (or `FACEBLUR_TEST_VIDEO`) through the real
+pipeline on the GPU: `.venv/Scripts/python -m pytest -m e2e tests/server -s` (a few minutes).
 
 ## GPU or CPU
 
