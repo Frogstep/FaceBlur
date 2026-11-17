@@ -116,6 +116,29 @@ rm -rf "$UV_CACHE_DIR"
 
 # ------------------------------------------------------------ check
 trap - ERR
+
+# ------------------------------------------------------------ system libraries
+# The app window needs a few system libraries that minimal installs lack. Installing
+# them is the only step that needs root: show the command and ask first.
+deps="$(.venv/bin/python -m faceblur.setup_models --system-deps 2>/dev/null || true)"
+if [ -n "$deps" ]; then
+    echo
+    echo "The app window needs some system libraries that are not installed. Command:"
+    echo "  sudo sh -c '$deps'"
+    if [ "$(id -u)" = 0 ]; then
+        sh -c "$deps" || echo "Installing the libraries failed; the check below lists what is missing."
+    elif command -v sudo >/dev/null && [ -t 0 ]; then
+        read -r -p "Install them now? sudo will ask for your password. [Y/n] " answer
+        case "$answer" in
+            [nN]*) echo "Skipped. The command line works without them." ;;
+            *) sudo sh -c "$deps" || echo "Installing the libraries failed; the check below lists what is missing." ;;
+        esac
+    else
+        echo "Run it as root, then start ./FaceBlur.sh. The command line works without them."
+    fi
+    echo
+fi
+
 echo "[5/5] Checking the installation"
 echo
 if .venv/bin/python -m faceblur.setup_models --check; then

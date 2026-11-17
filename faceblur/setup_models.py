@@ -103,9 +103,24 @@ def _mb(n: float) -> str:
     return f"{n / 1e6:,.0f} MB"
 
 
+def _ssl_context():
+    """Verify HTTPS with the operating system. Python on Windows only sees the root
+    certificates already installed, and a fresh Windows installs most of them on
+    first use, so plain urllib fails there with CERTIFICATE_VERIFY_FAILED."""
+    try:
+        import ssl
+        import truststore
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except ImportError:  # development setups without truststore
+        return None
+
+
+_SSL = _ssl_context()
+
+
 def _open(url: str, **headers):
     req = urllib.request.Request(url, headers={"User-Agent": "faceblur-setup", **headers})
-    return urllib.request.urlopen(req, timeout=60)
+    return urllib.request.urlopen(req, timeout=60, context=_SSL)
 
 
 def published_sha(sha_url: str, filename: str) -> str:
@@ -211,17 +226,20 @@ def fetch(items: list[Item]) -> None:
 
 # ---------------------------------------------------------------- Linux system libraries
 
-# Qt's X11 plugin needs a few system libraries that minimal desktops may lack.
-# Package names per distribution family (from ID / ID_LIKE in /etc/os-release).
+# Qt's GUI library and X11 plugin need a few system libraries that minimal installs
+# (servers, WSL, "minimal" desktop images) may lack. Install commands per
+# distribution family (from ID / ID_LIKE in /etc/os-release), run as root.
 QT_PACKAGES = {
-    "debian": "sudo apt install libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 "
-              "libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 libegl1 libgl1 libfontconfig1 libdbus-1-3",
-    "fedora": "sudo dnf install xcb-util-cursor xcb-util-wm xcb-util-image xcb-util-keysyms xcb-util-renderutil "
-              "libxkbcommon-x11 mesa-libEGL mesa-libGL fontconfig dbus-libs",
-    "arch": "sudo pacman -S --needed xcb-util-cursor xcb-util-wm xcb-util-image xcb-util-keysyms "
-            "xcb-util-renderutil libxkbcommon-x11 libglvnd fontconfig",
-    "suse": "sudo zypper install libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 "
-            "libxcb-render-util0 libxcb-xkb1 libEGL1 libGL1 fontconfig",
+    "debian": ["apt-get update",
+               "apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 "
+               "libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 libegl1 libgl1 libfontconfig1 "
+               "libdbus-1-3"],
+    "fedora": ["dnf install -y xcb-util-cursor xcb-util-wm xcb-util-image xcb-util-keysyms xcb-util-renderutil "
+               "libxkbcommon-x11 mesa-libEGL mesa-libGL fontconfig dbus-libs"],
+    "arch": ["pacman -S --needed --noconfirm xcb-util-cursor xcb-util-wm xcb-util-image xcb-util-keysyms "
+             "xcb-util-renderutil libxkbcommon-x11 libglvnd fontconfig"],
+    "suse": ["zypper --non-interactive install libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-image0 "
+             "libxcb-keysyms1 libxcb-render-util0 libxcb-xkb1 libEGL1 libGL1 fontconfig"],
 }
 _FAMILY = {"ubuntu": "debian", "linuxmint": "debian", "pop": "debian", "rhel": "fedora", "centos": "fedora",
            "rocky": "fedora", "almalinux": "fedora", "manjaro": "arch", "endeavouros": "arch",
@@ -243,16 +261,27 @@ def distro_family() -> str | None:
 
 
 def qt_missing_libs() -> list[str]:
-    """System libraries Qt's X11 platform plugin cannot find (Linux only)."""
+    """System libraries Qt's GUI library or X11 platform plugin cannot find (Linux only)."""
     try:
         import PySide6
     except ImportError:
         return []
-    plugin = Path(PySide6.__file__).parent / "Qt" / "plugins" / "platforms" / "libqxcb.so"
-    if not plugin.exists() or not shutil.which("ldd"):
+    qt = Path(PySide6.__file__).parent / "Qt"
+    libs = [qt / "plugins" / "platforms" / "libqxcb.so", *sorted((qt / "lib").glob("libQt6Gui.so*"))[:1]]
+    libs = [str(p) for p in libs if p.exists()]
+    if not libs or not shutil.which("ldd"):
         return []
-    out = subprocess.run(["ldd", str(plugin)], capture_output=True, text=True).stdout
+    out = subprocess.run(["ldd", *libs], capture_output=True, text=True).stdout
     return sorted({ln.split()[0] for ln in out.splitlines() if "not found" in ln})
+
+
+def system_deps_command() -> str:
+    """The root shell command that installs the missing libraries ("" if none are
+    missing or the distribution is unknown)."""
+    if WINDOWS or not qt_missing_libs():
+        return ""
+    fam = distro_family()
+    return " && ".join(QT_PACKAGES[fam]) if fam else ""
 
 
 # ---------------------------------------------------------------- check
@@ -288,7 +317,8 @@ def check() -> int:
             print("System libraries for the app window are missing:\n  " + " ".join(missing))
             fam = distro_family()
             if fam:
-                print(f"Install them with:\n  {QT_PACKAGES[fam]}")
+                cmd = " && ".join("sudo " + c for c in QT_PACKAGES[fam])
+                print(f"Install them with (or run the installer again, it offers to):\n  {cmd}")
             else:
                 print("Install your distribution's packages for these libraries (xcb-util-cursor and friends).")
             print("(The command line works without them.)")
@@ -333,9 +363,16 @@ def main(argv: list[str] | None = None) -> int:
     which.add_argument("--all", action="store_true", help="both SAM 2.1 sizes")
     ap.add_argument("--no-ffmpeg", action="store_true", help="use FFmpeg from PATH instead of downloading it")
     ap.add_argument("--check", action="store_true", help="only report the installation")
+    ap.add_argument("--system-deps", action="store_true",
+                    help="Linux: print the root command that installs missing system libraries (nothing if none)")
     a = ap.parse_args(argv)
     if a.check:
         return check()
+    if a.system_deps:
+        cmd = system_deps_command()
+        if cmd:
+            print(cmd)
+        return 0
 
     sizes = ["tiny"] if a.cpu else ["large", "tiny"] if a.all else ["large"]
     items = FACE_MODELS + [SAM_MODELS[s] for s in sizes] + ([] if a.no_ffmpeg else FFMPEG)

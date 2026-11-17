@@ -116,6 +116,8 @@ class MainWindow(QMainWindow):
             b = QToolButton()
             b.setText(text)
             b.setToolTip(tr(tip))
+            b.setMinimumSize(44, 36)
+            b.setStyleSheet("QToolButton { font-size: 18px; padding: 2px 8px; }")
             b.clicked.connect(fn)
             bar.addWidget(b)
             return b
@@ -268,9 +270,20 @@ class MainWindow(QMainWindow):
         row.addWidget(self.out_edit)
         row.addWidget(browse)
         rv.addLayout(row)
+        self.safety_cb = QCheckBox(tr("Run safety check after rendering"))
+        self.safety_cb.setToolTip(tr("Re-detect faces in the output and flag frames where a masked face "
+                                     "may still be recognizable (slower)"))
+        self.safety_cb.setChecked(False)
+        self.safety_cb.toggled.connect(self._on_safety_toggled)
+        rv.addWidget(self.safety_cb)
         row = QHBoxLayout()
         self.render_btn = QPushButton(tr("Render  (Ctrl+R)"))
-        self.render_btn.setStyleSheet("font-weight: bold; padding: 6px;")
+        # blue (same as the progress bars' highlight) only while it can be clicked
+        self.render_btn.setStyleSheet(
+            "QPushButton { font-weight: bold; padding: 6px; }"
+            "QPushButton:enabled { background: #3d78dc; color: white; border: 1px solid #2f63bd; border-radius: 3px; }"
+            "QPushButton:enabled:hover { background: #4a86ea; }"
+            "QPushButton:enabled:pressed { background: #2f63bd; }")
         self.render_btn.clicked.connect(self.start_render)
         self.cancel_btn = QPushButton(tr("Cancel"))
         self.cancel_btn.clicked.connect(self.cancel_task)
@@ -291,7 +304,7 @@ class MainWindow(QMainWindow):
         # safety
         g = QGroupBox(tr("Safety check"))
         scv = QVBoxLayout(g)
-        self.safety_label = QLabel(tr("Runs automatically after rendering."))
+        self.safety_label = QLabel(self._safety_idle_text())
         self.safety_label.setWordWrap(True)
         scv.addWidget(self.safety_label)
         self.safety_list = QListWidget()
@@ -438,7 +451,7 @@ class MainWindow(QMainWindow):
         self._rebuild_people()
         self._clear_faces(tr("Detecting faces…"))
         self.safety_list.clear()
-        self.safety_label.setText(tr("Runs automatically after rendering."))
+        self.safety_label.setText(self._safety_idle_text())
         self.show_frame()
         self._load_existing_output()
         if info.vfr:
@@ -1134,7 +1147,8 @@ class MainWindow(QMainWindow):
         self.out_grabber = None
         self.flagged = []
         self.safety_list.clear()
-        self.safety_label.setText(tr("Waiting for render…"))
+        check = self.safety_cb.isChecked()
+        self.safety_label.setText(tr("Waiting for render…") if check else self._safety_idle_text())
         self.timeline.set_flags([])
         self._set_enabled()
         project, analysis = self.project, self.analysis
@@ -1142,6 +1156,10 @@ class MainWindow(QMainWindow):
 
         def job(progress, cancel):
             result = render(project, analysis, progress=progress, cancel=cancel, log=self._render_log.append)
+            if not check:
+                # drop an older report so it isn't shown later as if it belonged to this output
+                (analysis.wd / "safety_report.json").unlink(missing_ok=True)
+                return result, None
             report = safety_check(result.output, load_target_refs(analysis.wd), analysis.wd,
                                   progress=progress, cancel=cancel)
             return result, report
@@ -1154,8 +1172,19 @@ class MainWindow(QMainWindow):
                                name=result.output.name, frames=result.frames, fps=f"{result.fps:.1f}",
                                unmasked=result.unmasked) + "\n" + "\n".join(self._render_log))
         self._show_report(result.output, report)
+        if report is None:
+            self.safety_label.setText(tr("Skipped (turned off for this render)."))
         self.view_out.setChecked(True)
         self.show_frame()
+
+    def _safety_idle_text(self) -> str:
+        return (tr("Runs automatically after rendering.") if self.safety_cb.isChecked()
+                else tr("Off. Tick “Run safety check after rendering” to run it."))
+
+    def _on_safety_toggled(self, _checked: bool) -> None:
+        # only update the hint while no result is on display
+        if self.task is None and self.out_grabber is None and not self.flagged:
+            self.safety_label.setText(self._safety_idle_text())
 
     def _load_existing_output(self) -> None:
         """Reopen a project that was rendered before: show its output and report."""

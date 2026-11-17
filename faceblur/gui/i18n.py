@@ -125,6 +125,12 @@ _RU = {
     "Label {n} more {cards} to render": "Разметьте ещё карточек: {n}",
     "Safety check": "Проверка безопасности",
     "Runs automatically after rendering.": "Запускается автоматически после рендера.",
+    "Run safety check after rendering": "Проверка безопасности после рендера",
+    "Re-detect faces in the output and flag frames where a masked face may still be recognizable (slower)":
+        "Повторно найти лица в результате и отметить кадры, где скрытое лицо всё ещё узнаваемо (медленнее)",
+    "Off. Tick “Run safety check after rendering” to run it.":
+        "Выключена. Отметьте «Проверка безопасности после рендера», чтобы запустить её.",
+    "Skipped (turned off for this render).": "Пропущена (выключена для этого рендера).",
 
     # ---- menus
     "&File": "&Файл",

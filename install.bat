@@ -76,6 +76,12 @@ set "SAM2_BUILD_CUDA=0"
 "%UV%" pip install --python .venv --no-deps --no-build-isolation "%SAM2%"
 if errorlevel 1 goto :fail
 
+rem PyTorch and onnxruntime need Microsoft's Visual C++ Runtime in Windows itself,
+rem which a fresh Windows may lack (or have in a too old version)
+".venv\Scripts\python.exe" -c "import torch, onnxruntime" >nul 2>&1
+if errorlevel 1 call :get_vcredist
+if errorlevel 1 goto :fail
+
 rem ------------------------------------------------------------ models + FFmpeg
 echo [4/5] Model weights and FFmpeg
 if /i "%VARIANT%"=="gpu" (
@@ -113,6 +119,34 @@ if errorlevel 1 (
 )
 "%SystemRoot%\System32\tar.exe" -xf "%UV_ZIP%" -C "%~dp0tools\uv"
 del "%UV_ZIP%"
+exit /b 0
+
+:get_vcredist
+echo.
+echo PyTorch needs the Microsoft Visual C++ Runtime, which is missing or too old.
+echo Installing Microsoft's official package: Windows will ask for permission.
+set "VCREDIST=%~dp0tools\vc_redist.x64.exe"
+"%SystemRoot%\System32\curl.exe" -fL --retry 3 -o "%VCREDIST%" "https://aka.ms/vc14/vc_redist.x64.exe"
+if errorlevel 1 exit /b 1
+rem run it only if it is really signed by Microsoft; RunAs shows the UAC prompt.
+rem An empty PSModulePath makes Windows PowerShell use its own modules even when
+rem this script was started from PowerShell 7.
+set "PSModulePath="
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$s = Get-AuthenticodeSignature -LiteralPath $env:VCREDIST;" ^
+  "if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { Write-Host 'The download is not signed by Microsoft.'; exit 1 };" ^
+  "try { $p = Start-Process -FilePath $env:VCREDIST -ArgumentList '/install','/passive','/norestart' -Verb RunAs -Wait -PassThru } catch { Write-Host 'Permission was not given.'; exit 1 };" ^
+  "if (@(0, 1638, 3010) -notcontains $p.ExitCode) { Write-Host ('The runtime installer failed with code ' + $p.ExitCode); exit 1 }"
+set "VCRESULT=%errorlevel%"
+del "%VCREDIST%" >nul 2>&1
+if not "%VCRESULT%"=="0" exit /b 1
+".venv\Scripts\python.exe" -c "import torch, onnxruntime"
+if errorlevel 1 (
+    echo PyTorch still does not load. If the runtime installer asked for a restart,
+    echo restart Windows and run install.bat again.
+    exit /b 1
+)
+echo Visual C++ Runtime installed.
 exit /b 0
 
 :fail
