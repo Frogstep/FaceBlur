@@ -121,7 +121,9 @@ class Settings(BaseModel):
     strength: float = Field(1.0, ge=0.2, le=5.0)
     pad: float = Field(0.3, ge=0.0, le=1.0)
     use_sam: bool = False  # SAM 2 face outlines (slow); off: ellipses
-    cq: int = Field(19, ge=0, le=51)
+    codec: Literal["h265", "h264"] = "h265"  # h265: smaller file; h264: plays in every browser
+    quality: Literal["best", "high", "medium", "small"] = "high"
+    cq: int | None = Field(None, ge=0, le=51)  # exact NVENC CQ / x264 CRF instead of the level (lower = better)
     safety_check: bool = False  # after rendering, look for blurred faces that are still recognizable
 
 
@@ -130,6 +132,8 @@ class SettingsPatch(BaseModel):
     strength: float | None = Field(None, ge=0.2, le=5.0)
     pad: float | None = Field(None, ge=0.0, le=1.0)
     use_sam: bool | None = None
+    codec: Literal["h265", "h264"] | None = None
+    quality: Literal["best", "high", "medium", "small"] | None = None  # clears cq unless cq is also given
     cq: int | None = Field(None, ge=0, le=51)
     safety_check: bool | None = None
 
@@ -551,6 +555,8 @@ def create_app(store: JobStore, worker: Worker, token: str, max_upload: int = 8 
             project = job.load_project()
             for k, v in body.model_dump(exclude_none=True).items():
                 setattr(project.settings, k, v)
+            if body.quality is not None and body.cq is None:
+                project.settings.cq = None  # a level replaces an exact number
             job.save_project(project)
             return Settings(**vars(project.settings))
 

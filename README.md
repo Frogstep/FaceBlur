@@ -3,8 +3,8 @@
 Blurs the faces you choose through a whole video. Pipeline: FFmpeg decode → low-light
 enhancement (detection copy only) → SCRFD face detection + ByteTrack face tracks → **you
 click the faces to blur** → masks (gap filling, continuity; ellipses, or exact outlines with
-SAM 2.1 when you turn it on) → pixelate/blur → H.265 encode with audio copied → optional
-safety pass.
+SAM 2.1 when you turn it on) → pixelate/blur → H.265 or H.264 encode with audio copied →
+optional safety pass.
 
 Both slow parts are **off by default** in the desktop app and the web app: *Precise outline
 with SAM 2* (otherwise each face gets a padded ellipse, much faster) and the *safety check*.
@@ -36,7 +36,10 @@ Double-click `FaceBlur.bat` (or drag a video onto it), or:
    - click a face box → blur that face or not, or *Don't blur here* (this frame, or while
      the face is followed continuously)
    - drag a rectangle → *Blur this area* (with SAM 2 on, it tracks the area from there)
-5. **Render** (Ctrl+R). If *Run safety check after rendering* is ticked, the check runs
+5. **Render** (Ctrl+R). Under the output file, choose the **Format**: *H.265* (default,
+   about half the file size) or *H.264* (plays everywhere, including every browser and old
+   devices), and the **Quality**: *Best*, *High* (default), *Medium* or *Small file*. Both
+   are saved in the project. If *Run safety check after rendering* is ticked, the check runs
    afterwards; frames where a blurred face may still be recognizable are listed and marked
    red on the timeline. Fix them and render again.
 
@@ -72,7 +75,11 @@ A project saved from the app (including its corrections) renders with:
 
 Output: `input_masked.mp4`. Options: `--style pixelate|blur|fill`, `--strength 1.5`
 (coarser), `--pad 0.4` (bigger margin), `--debug` (overlay video in `work/input/debug.mp4`),
-`--sam` (exact outlines with SAM 2; new projects use ellipses), `--no-sam`, `--no-check`.
+`--sam` (exact outlines with SAM 2; new projects use ellipses), `--no-sam`, `--no-check`,
+`--codec h265|h264` (default h265), `--quality best|high|medium|small` (default high).
+`--cq 0-51` sets the encoder's number directly instead of a level (NVENC CQ / x264 CRF,
+lower = better and bigger); the levels are H.265 16/19/23/28 and H.264 15/18/22/26. The
+GPU encodes with NVENC, the CPU with x265/x264.
 
 The safety pass runs automatically after rendering (exit code 2 if something is flagged).
 To run it again on its own:
@@ -113,6 +120,9 @@ resumable upload (`POST /api/v1/uploads`, then `PATCH /api/v1/jobs/{id}/upload` 
 (each with `blur: false` at first; `…/frames/{n}.jpg` for whole frames with numbered boxes)
 → `PATCH …/blur` (`{"cards": {"1": true, "4": true}}`; or `PUT …/blur` with `{"blur": [1, 4]}`
 to set exactly those) → `POST …/render` → poll until `done` → `GET …/result` (resumable download) and `GET …/safety`.
+`PATCH …/settings` also takes the output `codec` (`h265`/`h264`), `quality`
+(`best`/`high`/`medium`/`small`) or an exact `cq`; the web app does not offer these yet, so
+its results are H.265 at *High* unless set through the API.
 
 Each upload gets its own folder in `jobs/` holding an ordinary project file, so a job can also
 be opened in the desktop app (`faceblur gui jobs/<id>/project.faceblur.json`). Jobs untouched

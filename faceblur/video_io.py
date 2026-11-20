@@ -1,7 +1,8 @@
 """FFmpeg-based decode and encode via subprocess pipes.
 
-Decode produces BGR uint8 frames in display orientation. Encode writes HEVC
-(NVENC) and copies the audio from the source file unchanged.
+Decode produces BGR uint8 frames in display orientation. Encode writes H.265 or
+H.264 (NVENC on the GPU, x265/x264 on the CPU) at a chosen quality level and
+copies the audio from the source file unchanged.
 
 Cut & crop (VideoInfo.with_edit) are applied while decoding: the readers seek to
 each kept range and crop each frame, so cut parts are never decoded and the
@@ -323,25 +324,67 @@ class FrameGrabber:
         return frame
 
 
-NVENC_MIN = (130, 34)  # smallest frame HEVC NVENC encodes (129x33, rounded up to even)
+# output formats: (GPU encoder, CPU encoder)
+ENCODERS = {"h265": ("hevc_nvenc", "libx265"), "h264": ("h264_nvenc", "libx264")}
+# smallest frame each NVENC encoder takes (rounded up to even); smaller ones (e.g. a
+# tight crop) go to the CPU encoder, which is fast at that size anyway
+NVENC_MIN = {"hevc_nvenc": (130, 34), "h264_nvenc": (146, 50)}
+# quality levels -> NVENC CQ / x264 CRF (lower = better, bigger file). H.264 needs
+# lower numbers than H.265 for the same picture; "high" for H.265 is the old fixed 19.
+QUALITY_LEVELS = ("best", "high", "medium", "small")
+QUALITY = {"h265": {"best": 16, "high": 19, "medium": 23, "small": 28},
+           "h264": {"best": 15, "high": 18, "medium": 22, "small": 26}}
 
 # audio codecs the MP4 container can carry as they are
 _MP4_AUDIO = {"aac", "mp3", "alac", "ac3", "eac3", "opus", "flac"}
 
 
-class FrameWriter:
-    """Encodes BGR frames to HEVC (NVENC on the GPU, x265 on the CPU) and copies
-    audio from the source."""
+def format_of(codec: str) -> str:
+    """'h264' or 'h265' for an FFmpeg encoder name."""
+    return "h264" if "264" in codec else "h265"
 
-    def __init__(self, out_path: str | Path, info: VideoInfo, cq: int = 19,
-                 codec: str | None = None):
+
+def quality_value(fmt: str, quality: str = "high", cq: int | None = None) -> int:
+    """The CQ/CRF number for a format and quality level; cq, when given, wins."""
+    if cq is not None:
+        return int(cq)
+    if quality not in QUALITY_LEVELS:
+        raise ValueError(f"quality must be one of {', '.join(QUALITY_LEVELS)}, not {quality!r}")
+    return QUALITY[fmt][quality]
+
+
+def encoder_args(codec: str, value: int) -> list[str]:
+    """FFmpeg options for one encoder at CQ/CRF value."""
+    if codec.endswith("_nvenc"):
+        return ["-preset", "p7", "-tune", "hq", "-rc", "vbr", "-cq", str(value), "-b:v", "0"]
+    if codec == "libx265":  # similar quality to NVENC at the same number
+        return ["-preset", "medium", "-crf", str(value + 1), "-x265-params", "log-level=error"]
+    if codec == "libx264":
+        return ["-preset", "medium", "-crf", str(value), "-profile:v", "high"]
+    return ["-crf", str(value)]
+
+
+class FrameWriter:
+    """Encodes BGR frames to H.265 or H.264 (NVENC on the GPU, x265/x264 on the CPU)
+    and copies audio from the source.
+
+    fmt ('h265'/'h264') and quality (QUALITY_LEVELS) pick the encoder and its
+    setting; cq overrides the level's number; codec forces an FFmpeg encoder."""
+
+    def __init__(self, out_path: str | Path, info: VideoInfo, cq: int | None = None,
+                 codec: str | None = None, fmt: str = "h265", quality: str = "high"):
         if codec is None:
             from .device import encoder
 
-            codec = encoder()
-        if codec == "hevc_nvenc" and (info.width < NVENC_MIN[0] or info.height < NVENC_MIN[1]):
-            codec = "libx265"  # NVENC refuses frames this small (e.g. a tight crop); they encode fast on the CPU
+            if fmt not in ENCODERS:
+                raise ValueError(f"format must be one of {', '.join(ENCODERS)}, not {fmt!r}")
+            codec = encoder(fmt)
+        fmt = format_of(codec)
+        small = NVENC_MIN.get(codec)
+        if small and (info.width < small[0] or info.height < small[1]):
+            codec = ENCODERS[fmt][1]
         self.codec = codec
+        self.quality = quality_value(fmt, quality, cq)
         self.out_path = Path(out_path)
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
@@ -382,16 +425,11 @@ class FrameWriter:
             "-vf", f"scale=out_color_matrix={info.color_matrix}:out_range={info.color_range},format=yuv420p",
             "-c:v", codec,
         ]
-        if codec.endswith("_nvenc"):
-            cmd += ["-preset", "p7", "-tune", "hq", "-rc", "vbr", "-cq", str(cq), "-b:v", "0"]
-        elif codec == "libx265":  # similar quality to NVENC at the same number
-            cmd += ["-preset", "medium", "-crf", str(cq + 1), "-x265-params", "log-level=error"]
-        else:
-            cmd += ["-crf", str(cq)]
+        cmd += encoder_args(codec, self.quality)
         cs = {"bt709": "bt709", "bt601": "smpte170m", "bt2020": "bt2020nc"}[info.color_matrix]
         cmd += ["-colorspace", cs, "-color_range", info.color_range]
-        if codec in ("hevc_nvenc", "libx265"):
-            cmd += ["-tag:v", "hvc1"]
+        if fmt == "h265":
+            cmd += ["-tag:v", "hvc1"]  # so Apple players open it
         cmd += ["-movflags", "+faststart", str(self.out_path)]
         self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, **_NOWIN)
 
