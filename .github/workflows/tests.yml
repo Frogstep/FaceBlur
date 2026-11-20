@@ -1,0 +1,41 @@
+name: Tests
+
+# Every commit pushed to a pull request (opened, synchronize, reopened).
+on:
+  pull_request:
+
+# A new push to the same PR cancels the run still going for the previous commit.
+concurrency:
+  group: tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: install/requirements-linux-cpu.txt
+
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      # The tests need neither PyTorch nor SAM 2: the face scan and render are faked,
+      # and the e2e tests (real models + GPU) are skipped unless run with -m e2e.
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r install/requirements-linux-cpu.txt pytest httpx
+
+      - name: Run tests
+        run: python -m pytest -v
