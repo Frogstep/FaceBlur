@@ -331,6 +331,26 @@ class MainWindow(QMainWindow):
         row.addWidget(self.out_edit)
         row.addWidget(browse)
         rv.addLayout(row)
+        row = QHBoxLayout()
+        self.codec_combo = QComboBox()
+        self.codec_combo.addItem(tr("H.265 (smaller file)"), "h265")
+        self.codec_combo.addItem(tr("H.264 (plays everywhere)"), "h264")
+        self.codec_combo.setToolTip(tr("H.265 needs about half the size for the same picture; "
+                                       "H.264 also plays in every browser and on old devices"))
+        self.quality_combo = QComboBox()
+        self.quality_combo.addItem(tr("Best"), "best")
+        self.quality_combo.addItem(tr("High"), "high")
+        self.quality_combo.addItem(tr("Medium"), "medium")
+        self.quality_combo.addItem(tr("Small file"), "small")
+        self.quality_combo.setCurrentIndex(self.quality_combo.findData("high"))  # the default until a project opens
+        self.quality_combo.setToolTip(tr("Higher quality makes a bigger file"))
+        row.addWidget(QLabel(tr("Format")))
+        row.addWidget(self.codec_combo, 3)
+        row.addWidget(QLabel(tr("Quality")))
+        row.addWidget(self.quality_combo, 2)
+        rv.addLayout(row)
+        for w in (self.codec_combo, self.quality_combo):
+            w.currentIndexChanged.connect(self._settings_changed)
         self.safety_cb = QCheckBox(tr("Run safety check after rendering"))
         self.safety_cb.setToolTip(tr("Re-detect faces in the output and flag frames where a masked face "
                                      "may still be recognizable (slower)"))
@@ -709,10 +729,16 @@ class MainWindow(QMainWindow):
     # ============================================================ settings
     def _load_settings_to_ui(self) -> None:
         s = self.project.settings
-        widgets = (self.style_combo, self.strength_spin, self.pad_spin, self.sam_cb)
+        widgets = (self.style_combo, self.strength_spin, self.pad_spin, self.sam_cb,
+                   self.codec_combo, self.quality_combo)
         for w in widgets:
             w.blockSignals(True)
         self.style_combo.setCurrentIndex(max(0, self.style_combo.findData(s.style)))
+        self.codec_combo.setCurrentIndex(max(0, self.codec_combo.findData(s.codec)))
+        self.quality_combo.setCurrentIndex(max(0, self.quality_combo.findData(s.quality)))
+        self.quality_combo.setToolTip(tr("Higher quality makes a bigger file") if s.cq is None else
+                                      tr("This project uses the exact setting {n} (lower = better); "
+                                         "choosing a level replaces it", n=s.cq))
         self.strength_spin.setValue(s.strength)
         self.pad_spin.setValue(s.pad)
         self.sam_cb.setChecked(s.use_sam)
@@ -728,6 +754,11 @@ class MainWindow(QMainWindow):
         s.strength = self.strength_spin.value()
         s.pad = self.pad_spin.value()
         s.use_sam = self.sam_cb.isChecked()
+        s.codec = self.codec_combo.currentData()
+        if self.quality_combo.currentData() != s.quality:
+            s.quality = self.quality_combo.currentData()
+            s.cq = None  # a chosen level replaces an exact number set elsewhere (CLI or API)
+            self.quality_combo.setToolTip(tr("Higher quality makes a bigger file"))
         self._mark_dirty()
         self.show_frame()
 

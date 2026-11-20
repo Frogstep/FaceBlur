@@ -489,6 +489,21 @@ def test_sam_and_safety_check_are_off_by_default(env, sample_video):
     assert r.json()["use_sam"] is True and r.json()["safety_check"] is True
 
 
+def test_output_format_and_quality(env, sample_video):
+    client, *_ = env
+    jid = upload(client, sample_video)
+    wait(client, jid, "review")
+    s = client.get(f"{API}/jobs/{jid}/project", headers=H).json()["settings"]
+    assert (s["codec"], s["quality"], s["cq"]) == ("h265", "high", None)
+    url = f"{API}/jobs/{jid}/settings"
+    r = client.patch(url, json={"codec": "h264", "cq": 21}, headers=H).json()
+    assert (r["codec"], r["cq"]) == ("h264", 21)
+    r = client.patch(url, json={"quality": "small"}, headers=H).json()
+    assert (r["quality"], r["cq"]) == ("small", None)  # a level replaces the exact number
+    assert client.patch(url, json={"codec": "vp9"}, headers=H).status_code == 422
+    assert client.patch(url, json={"quality": "ultra"}, headers=H).status_code == 422
+
+
 def test_worker_runs_the_safety_check_only_when_it_is_on(tmp_path, sample_video, monkeypatch):
     """The real worker step, with the slow render and check replaced."""
     import faceblur.pipeline as pl

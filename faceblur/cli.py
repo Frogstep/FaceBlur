@@ -239,9 +239,13 @@ def cmd_render(args) -> int:
     if args.output:
         project.output = str(Path(args.output).resolve())
     s = project.settings
-    for key in ("style", "strength", "pad"):
+    for key in ("style", "strength", "pad", "codec", "cq"):
         if getattr(args, key) is not None:
             setattr(s, key, getattr(args, key))
+    if args.quality is not None:
+        s.quality = args.quality
+        if args.cq is None:
+            s.cq = None  # a level replaces an exact number saved in the project
     if args.sam:
         s.use_sam = True
     if args.no_sam:
@@ -349,7 +353,7 @@ def main(argv=None) -> int:
     p.add_argument("video")
     p.set_defaults(fn=cmd_pick)
 
-    r = sub.add_parser("render", parents=[common, edit], help="blur the chosen faces and encode H.265")
+    r = sub.add_parser("render", parents=[common, edit], help="blur the chosen faces and encode H.265 or H.264")
     r.add_argument("video", nargs="?")
     r.add_argument("--blur", "--face", dest="blur", action="append", metavar="N[,N...]",
                    help="card numbers (from `pick`) to blur, e.g. --blur 1,2,5; every other face stays visible")
@@ -358,6 +362,12 @@ def main(argv=None) -> int:
     r.add_argument("--style", choices=["pixelate", "blur", "fill"])
     r.add_argument("--strength", type=float, help="higher = coarser pixelation (default 1.0)")
     r.add_argument("--pad", type=float, help="extra margin around the face box (default 0.3)")
+    r.add_argument("--codec", choices=["h265", "h264"],
+                   help="output format: h265 = smaller file (default), h264 = plays everywhere")
+    r.add_argument("--quality", choices=["best", "high", "medium", "small"],
+                   help="best = biggest file, small = smallest (default high)")
+    r.add_argument("--cq", type=int, choices=range(0, 52), metavar="0-51",
+                   help="exact encoder quality instead of --quality (NVENC CQ / x264 CRF; lower = better)")
     r.add_argument("--sam", action="store_true", help="precise face outlines with SAM 2 (slower; off by default)")
     r.add_argument("--no-sam", action="store_true", help="box/ellipse masking only (the default for new projects)")
     r.add_argument("--debug", action="store_true", help="also write work/<name>/debug.mp4 overlay")

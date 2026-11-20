@@ -122,6 +122,20 @@ _RU = {
     "Render": "Рендер",
     "Output file": "Выходной файл",
     "Choose the output file": "Выбрать выходной файл",
+    "Format": "Формат",
+    "H.265 (smaller file)": "H.265 (файл меньше)",
+    "H.264 (plays everywhere)": "H.264 (открывается везде)",
+    "H.265 needs about half the size for the same picture; H.264 also plays in every browser and on old devices":
+        "H.265 даёт то же качество при примерно вдвое меньшем файле; H.264 открывается в любом браузере "
+        "и на старых устройствах",
+    "Quality": "Качество",
+    "Best": "Наилучшее",
+    "High": "Высокое",
+    "Medium": "Среднее",
+    "Small file": "Маленький файл",
+    "Higher quality makes a bigger file": "Чем выше качество, тем больше файл",
+    "This project uses the exact setting {n} (lower = better); choosing a level replaces it":
+        "В этом проекте задано точное значение {n} (меньше = лучше); выбор уровня заменит его",
     "Render  (Ctrl+R)": "Рендер  (Ctrl+R)",
     "Safety check": "Проверка безопасности",
     "Runs automatically after rendering.": "Запускается автоматически после рендера.",

@@ -378,7 +378,7 @@ def render(project: Project, analysis: Analysis, progress: Progress | None = Non
     # cancelled or failed render never leaves half a video next to the output
     tmp = temp_dir() / f"{out.stem}.{uuid.uuid4().hex[:8]}.partial{out.suffix}"
     try:
-        with FrameWriter(tmp, info, cq=s.cq) as writer:
+        with FrameWriter(tmp, info, cq=s.cq, fmt=s.codec, quality=s.quality) as writer:
             for f, (frame, sam_mask, status) in enumerate(stream):
                 if cancel and cancel():
                     raise Cancelled()

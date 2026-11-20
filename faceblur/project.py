@@ -11,7 +11,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-VERSION = 3  # 2: face cards labeled by the user (replaces automatic face groups); 3: cut & crop
+VERSION = 4  # 2: face cards labeled by the user (replaces automatic face groups); 3: cut & crop;
+# 4: output format and quality level (cq became an optional override)
 
 
 @dataclass
@@ -66,8 +67,17 @@ class Settings:
     strength: float = 1.0
     pad: float = 0.3
     use_sam: bool = False  # SAM 2 face outlines (slow); off: ellipses
-    cq: int = 19  # NVENC quality (lower = better)
+    codec: str = "h265"  # output format: h265 (smaller files) / h264 (plays everywhere)
+    quality: str = "high"  # best / high / medium / small (see video_io.QUALITY)
+    cq: int | None = None  # exact CQ/CRF number instead of the level (lower = better)
     safety_check: bool = False  # web server: run the safety check after rendering
+
+
+def _settings(d: dict, version: int) -> Settings:
+    d = dict(d)
+    if version < 4 and d.get("cq") == 19:
+        d.pop("cq")  # the old fixed default, now the "high" level: lets the level follow the format
+    return Settings(**d)
 
 
 @dataclass
@@ -124,7 +134,7 @@ class Project:
             labels=[Label(**x) for x in d.get("labels", [])],
             exclusions=[Exclusion(**x) for x in d.get("exclusions", [])],
             manual=[Manual(**x) for x in d.get("manual", [])],
-            settings=Settings(**d.get("settings", {})),
+            settings=_settings(d.get("settings", {}), d.get("version", 1)),
             edit=Edit(**d.get("edit", {})),
             output=absolute(d["output"]) if d.get("output") else "",
             path=str(p),

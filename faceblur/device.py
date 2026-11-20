@@ -6,7 +6,7 @@ NVIDIA card (much slower, same algorithm):
   decode     FFmpeg NVDEC          -> FFmpeg software decode
   faces      onnxruntime CUDA      -> onnxruntime CPU
   SAM 2      PyTorch CUDA (large)  -> PyTorch CPU (tiny model if downloaded)
-  encode     hevc_nvenc            -> libx265
+  encode     hevc_nvenc/h264_nvenc -> libx265/libx264
 
 Set with set_device(), the --device CLI option, the app's settings, or the
 FACEBLUR_DEVICE environment variable.
@@ -76,10 +76,10 @@ def _ffmpeg_works(args: list[str]) -> bool:
         return False
 
 
-@functools.lru_cache(maxsize=1)
-def nvenc_works() -> bool:
+@functools.lru_cache(maxsize=None)
+def nvenc_works(codec: str = "hevc_nvenc") -> bool:
     """Encode a few frames with NVENC; listing the encoder is not enough (no GPU, old driver)."""
-    return _ffmpeg_works(["-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.2", "-c:v", "hevc_nvenc",
+    return _ffmpeg_works(["-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.2", "-c:v", codec,
                           "-f", "null", "-"])
 
 
@@ -101,8 +101,12 @@ def decode_on_gpu() -> bool:
     return _PREF != "cpu" and nvdec_works()
 
 
-def encoder() -> str:
-    return "hevc_nvenc" if _PREF != "cpu" and nvenc_works() else "libx265"
+def encoder(fmt: str = "h265") -> str:
+    """FFmpeg encoder for output format 'h265' or 'h264': NVENC when it works, else x265/x264."""
+    from .video_io import ENCODERS
+
+    gpu, cpu = ENCODERS[fmt]
+    return gpu if _PREF != "cpu" and nvenc_works(gpu) else cpu
 
 
 def check_forced_gpu() -> None:
