@@ -1,13 +1,15 @@
 """FaceBlur main window.
 
-Workflow: open a video -> faces are detected (cached) and shown as face cards,
-all not blurred -> the user clicks the faces to blur in the Review tab -> fix
+Workflow: open a video -> cut & crop it if wanted (the view shows the whole
+source; faces are only looked for in what is kept) -> Detect faces (cached) ->
+face cards, all not blurred -> the user clicks the faces to blur in the Review tab -> fix
 individual frames (click a box: "don't blur here"; drag a box: "blur this
 area") -> render -> review the safety check.
 """
 
 from __future__ import annotations
 
+import copy
 import sys
 from pathlib import Path
 
@@ -20,10 +22,12 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QRadioButton, QScrollArea, QSpinBox, QSplitter, QTabWidget, QToolButton, QVBoxLayout,
                                QWidget)
 
+from .. import __version__
+from ..edit import CutList
 from ..identity import Cancelled  # noqa: F401  (re-exported for workers)
-from ..pipeline import Analysis, card_thumbnails, load_target_refs, render, safety_check
-from ..project import Exclusion, Manual, Project
-from ..video_io import FrameGrabber, probe
+from ..pipeline import Analysis, card_thumbnails, detections_cache, load_target_refs, render, safety_check, workdir
+from ..project import Edit, Exclusion, Manual, Project
+from ..video_io import FrameGrabber, fit_crop, probe
 from . import i18n
 from .i18n import HELP_EN, LANGUAGES, tr, trn
 from .review_tab import ReviewPanel
@@ -32,6 +36,20 @@ from .workers import Player, Task
 
 VIDEO_EXTS = "*.mp4 *.mov *.mkv *.avi *.m4v *.webm *.mts *.m2ts *.wmv"
 _WINDOWS: list = []  # keeps the current main window alive across language switches
+
+
+# blue (same as the progress bars' highlight) only while it can be clicked
+PRIMARY_STYLE = (
+    "QPushButton { font-weight: bold; padding: 6px; }"
+    "QPushButton:enabled { background: #3d78dc; color: white; border: 1px solid #2f63bd; border-radius: 3px; }"
+    "QPushButton:enabled:hover { background: #4a86ea; }"
+    "QPushButton:enabled:pressed { background: #2f63bd; }")
+FACES_HINT = ("Click a face box to blur it or leave it visible. "
+              "Drag a rectangle to blur an area the detector missed.")
+EDIT_HINT = ("Crop: drag the corners or edges of the frame (drag outside it to draw a new crop). "
+             "Cut: split at the playhead (S) and remove the parts you don't need (Delete), or cut the "
+             "start and end (I / O). Faces are only looked for in what is left.")
+ASPECTS = (("Free", 0.0), ("16:9", 16 / 9), ("9:16", 9 / 16), ("1:1", 1.0), ("4:3", 4 / 3), ("4:5", 4 / 5))
 
 
 def video_filter() -> str:
@@ -63,6 +81,16 @@ class MainWindow(QMainWindow):
         self.dirty = False
         self.task: Task | None = None
         self.player: Player | None = None
+        # cut & crop
+        self.src_info = None  # the source video, uncut and uncropped (self.info is the edited one)
+        self.src_grabber: FrameGrabber | None = None
+        self.editing = False  # edit mode: the view and timeline show the source
+        self.cuts: CutList | None = None
+        self._undo: list = []
+        self._redo: list = []
+        self._edit_confirmed = False  # the user agreed to clear face choices for this edit session
+        self._scanned_edit: Edit | None = None  # the cut & crop the current face scan was made for
+        self._play_info = None  # what the player plays in edit mode (the kept parts, uncropped)
 
         self._build_ui()
         self._build_menu()
@@ -146,11 +174,42 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.preview_cb)
         bar.addWidget(self.boxes_cb)
         lv.addLayout(bar)
-        hint = QLabel(tr("Click a face box to blur it or leave it visible. "
-                         "Drag a rectangle to blur an area the detector missed."))
-        hint.setStyleSheet("color: #999;")
-        hint.setWordWrap(True)
-        lv.addWidget(hint)
+
+        # cut & crop tools: visible in edit mode
+        self.edit_bar = QWidget()
+        eb = QHBoxLayout(self.edit_bar)
+        eb.setContentsMargins(0, 0, 0, 0)
+
+        def ebtn(text, tip, fn):
+            b = QPushButton(tr(text))
+            b.setToolTip(tr(tip))
+            b.clicked.connect(fn)
+            eb.addWidget(b)
+            return b
+        ebtn("⇤ Start here", "Cut everything before the playhead (I)", self._cut_in)
+        ebtn("End here ⇥", "Cut everything after the playhead (O)", self._cut_out)
+        ebtn("Split", "Split the part under the playhead (S)", self._cut_split)
+        self.cut_toggle_btn = ebtn("Remove part", "Remove the part under the playhead, or bring it back (Delete)",
+                                   self._cut_toggle)
+        eb.addSpacing(18)
+        eb.addWidget(QLabel(tr("Crop")))
+        self.aspect_combo = QComboBox()
+        for label, ar in ASPECTS:
+            self.aspect_combo.addItem(tr(label), ar)
+        self.aspect_combo.setToolTip(tr("Shape of the crop"))
+        self.aspect_combo.currentIndexChanged.connect(self._aspect_changed)
+        eb.addWidget(self.aspect_combo)
+        ebtn("Full frame", "Remove the crop", self._crop_reset)
+        eb.addStretch(1)
+        self.undo_btn = ebtn("Undo", "Undo (Ctrl+Z)", self._edit_undo)
+        self.redo_btn = ebtn("Redo", "Redo (Ctrl+Y)", self._edit_redo)
+        self.edit_bar.setVisible(False)
+        lv.addWidget(self.edit_bar)
+
+        self.hint = QLabel(tr(FACES_HINT))
+        self.hint.setStyleSheet("color: #999;")
+        self.hint.setWordWrap(True)
+        lv.addWidget(self.hint)
         self.tabs = QTabWidget()
         self.tabs.addTab(left, tr("Video"))
         self.review = ReviewPanel()
@@ -164,15 +223,30 @@ class MainWindow(QMainWindow):
         sv = QVBoxLayout(side)
         sv.setContentsMargins(6, 6, 6, 6)
 
-        # face review summary (the cards themselves are in the Review faces tab)
-        g = QGroupBox(tr("Face review"))
-        fv = QVBoxLayout(g)
-        self.faces_note = QLabel(tr("Open a video to detect faces."))
-        self.faces_note.setWordWrap(True)
-        fv.addWidget(self.faces_note)
-        self.review_btn = QPushButton(tr("Open the face review"))
-        self.review_btn.clicked.connect(lambda: self.tabs.setCurrentWidget(self.review))
-        fv.addWidget(self.review_btn)
+        # open a video or project (same as File › Open)
+        open_btn = QPushButton(tr("Open video or project…"))
+        open_btn.setMinimumHeight(36)
+        open_btn.clicked.connect(self.open_dialog)
+        self.reset_btn = QPushButton(tr("Reset project…"))
+        self.reset_btn.setMinimumHeight(36)
+        self.reset_btn.setToolTip(tr("Start over with this video: deletes the detected faces, your choices, "
+                                     "corrections, cut & crop and the work folder"))
+        self.reset_btn.clicked.connect(self.reset_project)
+        row = QHBoxLayout()
+        row.addWidget(open_btn, 3)
+        row.addWidget(self.reset_btn, 2)
+        sv.addLayout(row)
+
+        # cut & crop: before faces are detected
+        g = QGroupBox(tr("Cut & crop").replace("&", "&&"))  # a single & would underline the next letter
+        ev = QVBoxLayout(g)
+        self.edit_summary = QLabel("–")
+        self.edit_summary.setWordWrap(True)
+        ev.addWidget(self.edit_summary)
+        self.edit_btn = QPushButton()
+        self.edit_btn.setMinimumHeight(36)
+        self.edit_btn.clicked.connect(self._edit_button)
+        ev.addWidget(self.edit_btn)
         sv.addWidget(g)
 
         # mask settings
@@ -265,12 +339,7 @@ class MainWindow(QMainWindow):
         rv.addWidget(self.safety_cb)
         row = QHBoxLayout()
         self.render_btn = QPushButton(tr("Render  (Ctrl+R)"))
-        # blue (same as the progress bars' highlight) only while it can be clicked
-        self.render_btn.setStyleSheet(
-            "QPushButton { font-weight: bold; padding: 6px; }"
-            "QPushButton:enabled { background: #3d78dc; color: white; border: 1px solid #2f63bd; border-radius: 3px; }"
-            "QPushButton:enabled:hover { background: #4a86ea; }"
-            "QPushButton:enabled:pressed { background: #2f63bd; }")
+        self.render_btn.setStyleSheet(PRIMARY_STYLE)
         self.render_btn.clicked.connect(self.start_render)
         self.cancel_btn = QPushButton(tr("Cancel"))
         self.cancel_btn.clicked.connect(self.cancel_task)
@@ -324,10 +393,15 @@ class MainWindow(QMainWindow):
                         ("Shift+Left", lambda: self.step(-self._fps_int())),
                         ("Shift+Right", lambda: self.step(self._fps_int())),
                         ("Home", lambda: self.seek(0)), ("End", lambda: self.seek(10**9)),
-                        ("Space", self.toggle_play)):
+                        ("Space", self.toggle_play),
+                        # cut & crop (edit mode only)
+                        ("I", self._cut_in), ("O", self._cut_out), ("S", self._cut_split),
+                        ("Delete", self._cut_toggle), ("Ctrl+Z", self._edit_undo), ("Ctrl+Y", self._edit_redo),
+                        ("Ctrl+Shift+Z", self._edit_redo)):
             sc = QShortcut(QKeySequence(key), left)
             sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             sc.activated.connect(fn)
+        self.view.cropChanged.connect(self._on_crop_changed)
 
     def _build_menu(self) -> None:
         m = self.menuBar().addMenu(tr("&File"))
@@ -342,6 +416,9 @@ class MainWindow(QMainWindow):
         self.rescan_action = QAction(tr("Detect faces again (discard cache)"), self)
         self.rescan_action.triggered.connect(self._rescan)
         m.addAction(self.rescan_action)
+        self.reset_action = QAction(tr("Reset project…"), self)
+        self.reset_action.triggered.connect(self.reset_project)
+        m.addAction(self.reset_action)
         m.addSeparator()
         a = QAction(tr("E&xit"), self)
         a.triggered.connect(self.close)
@@ -359,20 +436,42 @@ class MainWindow(QMainWindow):
         a = QAction(tr("How to use"), self)
         a.triggered.connect(self._help)
         h.addAction(a)
+        h.addSeparator()
+        a = QAction(f"FaceBlur {__version__}", self)  # update.bat installs newer versions
+        a.setEnabled(False)
+        h.addAction(a)
 
     def _set_enabled(self) -> None:
         busy = self.task is not None
         ready = self.analysis is not None
-        self.render_btn.setEnabled(ready and not busy)
+        editing = self.editing
+        self.render_btn.setEnabled(ready and not busy and not editing)
         self.render_btn.setText(tr("Render  (Ctrl+R)"))
         self.device_combo.setEnabled(not busy)  # never switch device in the middle of a job
         self.cancel_btn.setEnabled(busy)
-        self.view.drawing_enabled = ready and not busy
-        self.rescan_action.setEnabled(self.project is not None and not busy)
+        self.view.drawing_enabled = ready and not busy and not editing
+        self.rescan_action.setEnabled(self.project is not None and not busy and not editing)
+        self.reset_btn.setEnabled(self.project is not None and not busy)
+        self.reset_action.setEnabled(self.project is not None and not busy)
         out_ok = self.out_grabber is not None
-        self.view_out.setEnabled(out_ok)
-        if not out_ok and self.view_out.isChecked():
+        self.view_out.setEnabled(out_ok and not editing)
+        if (not out_ok or editing) and self.view_out.isChecked():
             self.view_orig.setChecked(True)
+        self.preview_cb.setEnabled(not editing)
+        self.boxes_cb.setEnabled(not editing)
+        self.tabs.setTabEnabled(1, not editing)
+        self.edit_bar.setEnabled(not busy)
+        self.undo_btn.setEnabled(bool(self._undo))
+        self.redo_btn.setEnabled(bool(self._redo))
+        self.edit_btn.setEnabled(self.project is not None and not busy)
+        if editing:
+            unchanged = self.analysis is not None and self._scanned_edit == self.project.edit
+            self.edit_btn.setText(tr("Back to the faces (nothing changed)") if unchanged
+                                  else tr("Detect faces  ▶"))
+            self.edit_btn.setStyleSheet(PRIMARY_STYLE)
+        else:
+            self.edit_btn.setText(tr("Change cut & crop…").replace("&", "&&"))
+            self.edit_btn.setStyleSheet("")
 
     def _fit_to_screen(self) -> None:
         """Restore the last window geometry, or fit the window to the screen's
@@ -413,7 +512,8 @@ class MainWindow(QMainWindow):
                 project = Project.load(Project.default_path(p))
             else:
                 project = Project.new(p)
-            info = probe(project.video)
+            src = probe(project.video)
+            info = src.with_edit(project.edit.keep, project.edit.crop) if project.edit.active else src
         except Exception as e:
             QMessageBox.critical(self, tr("Cannot open"), f"{path}\n\n{e}")
             return
@@ -424,6 +524,16 @@ class MainWindow(QMainWindow):
             self.task = None
         self.project, self.info, self.analysis = project, info, None
         self.grabber = FrameGrabber(info)
+        self.src_info, self.src_grabber = src, (FrameGrabber(src) if src is not info else self.grabber)
+        self.cuts = CutList(src.num_frames, project.edit.keep)
+        self._undo.clear()
+        self._redo.clear()
+        self._scanned_edit = None
+        self.editing = False
+        self.view.set_crop_mode(False)
+        self.edit_bar.setVisible(False)
+        self.timeline.set_parts(None)
+        self.hint.setText(tr(FACES_HINT))
         self.out_grabber = None
         self.frame, self.plans, self.flagged, self.blurred = 0, [], [], []
         self.dirty = False
@@ -432,26 +542,37 @@ class MainWindow(QMainWindow):
         self.timeline.set_tracks([])
         self.timeline.set_flags([])
         self._load_settings_to_ui()
-        self._clear_faces(tr("Detecting faces…"))
+        self._clear_faces()
         self.safety_list.clear()
         self.safety_label.setText(self._safety_idle_text())
         self.show_frame()
         self._load_existing_output()
+        self._update_edit_summary()
         if info.vfr:
             self.status.setText(tr("Note: variable frame rate video; the output will use a constant frame rate."))
-        self._run_task(self._analysis_job(project.video), self._on_analysis_done, tr("Detecting faces"))
+        if detections_cache(workdir(project.video), info).exists():  # scanned before: straight to the faces
+            self._run_task(self._analysis_job(project.video), self._on_analysis_done, tr("Detecting faces"))
+        else:  # new: cut & crop first, so faces are only looked for where needed
+            self._enter_edit()
+            if not info.vfr:
+                self.status.setText(tr("Cut and crop the video if you need to, then click Detect faces."))
 
     def _analysis_job(self, video: str):
+        edit = copy.deepcopy(self.project.edit)
+
         def job(progress, cancel):
-            analysis = Analysis.open(video, progress=progress, cancel=cancel)
+            analysis = Analysis.open(video, progress=progress, cancel=cancel, edit=edit)
             thumbs = card_thumbnails(analysis, 84, progress=progress, cancel=cancel)
-            return analysis, thumbs
+            return analysis, thumbs, edit
         return job
 
     def _on_analysis_done(self, result) -> None:
-        analysis, thumbs = result
+        analysis, thumbs, edit = result
         if self.project is None or analysis.video != Path(self.project.video).resolve():
             return  # result for a video that is no longer open
+        if self.editing or edit != self.project.edit:
+            return  # made for a cut & crop that has changed since
+        self._scanned_edit = edit
         self.analysis = analysis
         a = self.analysis
         self.review.set_cards(a.cards, a.dets, a.info.fps_float, thumbs)
@@ -473,15 +594,53 @@ class MainWindow(QMainWindow):
                                    "Face cards will change, so all face labels and corrections are cleared.")) \
                 != QMessageBox.StandardButton.Yes:
             return
-        from ..pipeline import workdir
+        from ..pipeline import clear_scan_cache
 
-        (workdir(self.project.video) / "detections.npz").unlink(missing_ok=True)
+        clear_scan_cache(workdir(self.project.video))
         self.project.labels.clear()
         self.project.exclusions.clear()
         self.analysis = None
         self._mark_dirty()
-        self._clear_faces(tr("Detecting faces…"))
+        self._clear_faces()
         self._run_task(self._analysis_job(self.project.video), self._on_analysis_done, tr("Detecting faces"))
+
+    def reset_project(self) -> None:
+        """Start over with the open video: delete its work folder (detections,
+        thumbnails, reports) and its project file, then open it as a new video.
+        The video and rendered outputs are kept."""
+        if self.project is None or self.task is not None:
+            return
+        import shutil
+
+        video = Path(self.project.video)
+        wd = workdir(video)
+        files = {Path(self.project.path), Project.default_path(video)}
+        msg = tr("Reset the project for {name}?\n\n"
+                 "This deletes the detected faces, your choice of faces to blur, the corrections, "
+                 "the cut & crop and the settings, and the work folder:\n{work}\n\n"
+                 "The video itself and rendered videos are kept. This cannot be undone.",
+                 name=video.name, work=wd)
+        if QMessageBox.question(self, tr("Reset project"), msg,
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        self._stop_player()
+        self._autosave_timer.stop()
+        self.analysis = None
+        try:
+            if wd.exists():
+                shutil.rmtree(wd)
+            for f in files:
+                f.unlink(missing_ok=True)
+        except OSError as e:
+            QMessageBox.critical(self, tr("Reset project"), tr("Could not delete everything:") + f"\n{e}")
+        self.dirty = False
+        self.aspect_combo.blockSignals(True)
+        self.aspect_combo.setCurrentIndex(0)
+        self.aspect_combo.blockSignals(False)
+        self.view.crop_aspect = None
+        self.open_path(str(video))
+        self.statusBar().showMessage(tr("Project reset: {name} is open as a new video.", name=video.name), 6000)
 
     def save_project(self) -> bool:
         if self.project is None:
@@ -625,8 +784,7 @@ class MainWindow(QMainWindow):
         self._schedule_recompute()
 
     # ============================================================ face review
-    def _clear_faces(self, note: str) -> None:
-        self.faces_note.setText(note)
+    def _clear_faces(self) -> None:
         self.blurred = []
         self.review.set_cards([], None, 30.0, {})
         self.review.set_blurred([])
@@ -635,19 +793,7 @@ class MainWindow(QMainWindow):
         if self.project is None or self.analysis is None:
             return
         self.review.set_blurred(self.blurred)
-        n, total = sum(self.blurred), len(self.blurred)
-        n_manual = len(self.project.manual)
-        if not total:
-            self.faces_note.setText(tr("No faces found. You can still drag boxes onto the video to blur areas."))
-        else:
-            text = trn(n, "<b>{n}</b> of {total} faces will be blurred.", "<b>{n}</b> of {total} faces will be blurred.",
-                       total=total)
-            if n_manual:
-                text += " " + trn(n_manual, "Plus {n} drawn area.", "Plus {n} drawn areas.")
-            if not n and not n_manual:
-                text += "<br><span style='color:#ffb020'>" + tr("Click the faces to blur in the Review faces tab.") \
-                        + "</span>"
-            self.faces_note.setText(text)
+        n = sum(self.blurred)
         self.tabs.setTabText(1, tr("Review faces ({n} blurred)", n=n))
         self._set_enabled()
 
@@ -668,8 +814,11 @@ class MainWindow(QMainWindow):
         n = self.analysis.dets.num_frames
         levels = np.zeros(n, np.int8)
         for plan in self.plans:
-            for f, s in enumerate(plan.source):
-                levels[f] = max(levels[f], 2 if s == "det" else (1 if s else 0))
+            lv = getattr(plan, "_levels", None)  # plans are cached and reused, so is this
+            if lv is None:
+                src = np.asarray(plan.source)
+                lv = plan._levels = np.where(src == "det", 2, (src != "").astype(np.int8)).astype(np.int8)
+            np.maximum(levels, lv[:n], out=levels)
         self.timeline.set_tracks([(BLUR_COLOR, levels)] if self.plans else [])
         self.show_frame()
 
@@ -712,7 +861,8 @@ class MainWindow(QMainWindow):
         self._stop_player()
         if self.info is None:
             return
-        self.frame = int(min(max(f, 0), self.info.num_frames - 1))
+        n = (self.src_info if self.editing else self.info).num_frames
+        self.frame = int(min(max(f, 0), n - 1))
         self.show_frame()
 
     def step(self, d: int) -> None:
@@ -720,6 +870,9 @@ class MainWindow(QMainWindow):
 
     def show_frame(self, img: np.ndarray | None = None) -> None:
         if self.info is None:
+            return
+        if self.editing:
+            self._show_source_frame(img)
             return
         f = self.frame
         output = self.view_out.isChecked() and self.out_grabber is not None
@@ -790,12 +943,20 @@ class MainWindow(QMainWindow):
             return
         if self.info is None:
             return
-        if self.frame >= self.info.num_frames - 1:
-            self.frame = 0
-        info = self.info
-        if self.view_out.isChecked() and self.out_grabber is not None:
-            info = self.out_grabber.info
-        self.player = Player(info, self.frame, self)
+        self._play_info = None
+        if self.editing:  # play the kept parts (uncropped, to see the crop), skipping what is cut
+            keep = self.cuts.keep()
+            info = self._play_info = self.src_info.with_edit(keep) if keep else self.src_info
+            start = info.from_source(self.frame, after=True)
+            if start is None or start >= info.num_frames - 1:
+                start = 0
+        else:
+            if self.frame >= self.info.num_frames - 1:
+                self.frame = 0
+            info, start = self.info, self.frame
+            if self.view_out.isChecked() and self.out_grabber is not None:
+                info = self.out_grabber.info
+        self.player = Player(info, start, self)
         self.player.tick.connect(self._on_play_tick)
         self.player.finished.connect(self._on_play_finished)
         self.player.start()
@@ -806,7 +967,8 @@ class MainWindow(QMainWindow):
             return
         item = self.player.latest()
         if item is not None:
-            self.frame, img = item
+            k, img = item
+            self.frame = self._play_info.to_source(k) if self._play_info is not None else k
             self.show_frame(img)
 
     def _on_play_finished(self) -> None:
@@ -820,6 +982,228 @@ class MainWindow(QMainWindow):
             p.stop()
             p.wait(2000)
             self.play_btn.setText("▶")
+
+    # ============================================================ cut & crop
+    def _edit_button(self) -> None:
+        if self.editing:
+            self._finish_edit()
+        else:
+            self._enter_edit()
+
+    def _enter_edit(self) -> None:
+        """Show the whole source with the cut parts and the crop, for editing."""
+        if self.project is None or self.src_info is None or self.task is not None:
+            return
+        self._stop_player()
+        src_frame = self.frame if self.editing else self.info.to_source(self.frame)
+        self.editing = True
+        self._edit_confirmed = False
+        self._undo.clear()
+        self._redo.clear()
+        self.view_orig.setChecked(True)
+        self.view.set_crop_mode(True)
+        self.view.set_crop(self.project.edit.crop)
+        self.edit_bar.setVisible(True)
+        self.hint.setText(tr(EDIT_HINT))
+        self.tabs.setCurrentIndex(0)
+        self.timeline.set_length(self.src_info.num_frames, self.src_info.fps_float)
+        self.timeline.set_parts(self.cuts.parts)
+        self.frame = min(max(src_frame, 0), self.src_info.num_frames - 1)
+        self._update_edit_summary()
+        self._set_enabled()
+        self.show_frame()
+        self.view.setFocus()
+
+    def _finish_edit(self) -> None:
+        """Leave edit mode: detect faces in the edited video (or go back to the
+        faces found before, when the cut & crop did not change)."""
+        e = self.project.edit
+        try:
+            info = self.src_info.with_edit(e.keep, e.crop) if e.active else self.src_info
+        except ValueError as err:
+            QMessageBox.warning(self, tr("Cut & crop"), str(err))
+            return
+        self._stop_player()
+        unchanged = self.analysis is not None and self._scanned_edit == e
+        src_frame = self.frame
+        self.editing = False
+        self.view.set_crop_mode(False)
+        self.edit_bar.setVisible(False)
+        self.timeline.set_parts(None)
+        self.hint.setText(tr(FACES_HINT))
+        self._undo.clear()
+        self._redo.clear()
+        if not unchanged:
+            self.info = info
+            self.grabber = FrameGrabber(info) if info is not self.src_info else self.src_grabber
+        self.timeline.set_length(self.info.num_frames, self.info.fps_float)
+        k = self.info.from_source(src_frame, after=True)
+        self.frame = k if k is not None else 0
+        self._update_edit_summary()
+        if unchanged:
+            self._set_enabled()
+            self.show_frame()
+            return
+        self.analysis, self.plans, self.excluded = None, [], set()
+        self._scanned_edit = None
+        self._clear_faces()
+        self.timeline.set_tracks([])
+        if self.dirty:
+            self.save_project()
+        self.show_frame()
+        self._run_task(self._analysis_job(self.project.video), self._on_analysis_done, tr("Detecting faces"))
+
+    def _edit_state(self) -> tuple:
+        crop = self.project.edit.crop
+        return self.cuts.state(), tuple(crop) if crop else None
+
+    def _set_edit_state(self, state: tuple) -> None:
+        parts, crop = state
+        self.cuts.restore(parts)
+        self.project.edit.crop = list(crop) if crop else None
+
+    def _edit_change(self, fn) -> None:
+        """Run fn(), which changes the cut or the crop and returns True when it
+        did, with undo. The first change of an edit session asks before clearing
+        the face choices made for the old cut & crop."""
+        if not self.editing or self.task is not None:
+            return
+        before = self._edit_state()
+        if not fn():
+            return
+        if not self._confirm_edit_change():
+            self._set_edit_state(before)
+            self._edit_applied()
+            return
+        self._undo.append(before)
+        del self._undo[:-200]
+        self._redo.clear()
+        self._edit_applied()
+
+    def _confirm_edit_change(self) -> bool:
+        p = self.project
+        if self._edit_confirmed or not (p.labels or p.exclusions or p.manual):
+            return True
+        n = len(p.labels)
+        fixes = len(p.exclusions) + len(p.manual)
+        msg = tr("Changing the cut or crop means detecting the faces again. This clears your choices "
+                 "({faces} chosen to blur, {fixes} corrections). Continue?", faces=n, fixes=fixes)
+        if QMessageBox.question(self, tr("Cut & crop"), msg) != QMessageBox.StandardButton.Yes:
+            return False
+        p.labels.clear()
+        p.exclusions.clear()
+        p.manual.clear()
+        self._edit_confirmed = True
+        self._refresh_corrections()
+        return True
+
+    def _edit_applied(self) -> None:
+        self.project.edit.keep = self.cuts.keep()
+        self.view.set_crop(self.project.edit.crop)
+        self.timeline.set_parts(self.cuts.parts)
+        self._mark_dirty()
+        self._update_edit_summary()
+        self._set_enabled()
+        self.show_frame()
+
+    def _cut_in(self) -> None:
+        self._edit_change(lambda: self.cuts.set_in(self.frame))
+
+    def _cut_out(self) -> None:
+        self._edit_change(lambda: self.cuts.set_out(self.frame))
+
+    def _cut_split(self) -> None:
+        self._edit_change(lambda: self.cuts.split(self.frame))
+
+    def _cut_toggle(self) -> None:
+        if not self.editing:
+            return
+        a, b, removed = self.cuts.parts[self.cuts.index_at(self.frame)]
+        if not removed and self.cuts.kept_frames() <= b - a:
+            self.statusBar().showMessage(tr("At least one part of the video must stay."), 4000)
+            return
+        self._edit_change(lambda: self.cuts.toggle_at(self.frame))
+
+    def _edit_undo(self) -> None:
+        if not self.editing or not self._undo or self.task is not None:
+            return
+        self._redo.append(self._edit_state())
+        self._set_edit_state(self._undo.pop())
+        self._edit_applied()
+
+    def _edit_redo(self) -> None:
+        if not self.editing or not self._redo or self.task is not None:
+            return
+        self._undo.append(self._edit_state())
+        self._set_edit_state(self._redo.pop())
+        self._edit_applied()
+
+    def _on_crop_changed(self, rect) -> None:
+        def apply():
+            try:
+                c = fit_crop(rect, self.src_info.width, self.src_info.height)
+            except ValueError:  # too small
+                return False
+            new = list(c) if c else None
+            if new == self.project.edit.crop:
+                return False
+            self.project.edit.crop = new
+            return True
+        self._edit_change(apply)
+        self.view.set_crop(self.project.edit.crop)  # rounded, or back to before when nothing changed
+
+    def _aspect_changed(self, *_) -> None:
+        ar = self.aspect_combo.currentData() or None
+        self.view.crop_aspect = ar
+        if ar is None or not self.editing:
+            self.view.update()
+            return
+        # the largest crop of this shape inside the current one, centred
+        x, y, w, h = self.view.crop_rect()
+        nw, nh = (h * ar, h) if w / h > ar else (w, w / ar)
+        self._on_crop_changed((x + (w - nw) / 2, y + (h - nh) / 2, nw, nh))
+
+    def _crop_reset(self) -> None:
+        if self.aspect_combo.currentIndex() != 0:
+            self.aspect_combo.blockSignals(True)
+            self.aspect_combo.setCurrentIndex(0)
+            self.aspect_combo.blockSignals(False)
+            self.view.crop_aspect = None
+        self._on_crop_changed(None)
+
+    def _update_edit_summary(self) -> None:
+        if self.project is None or self.src_info is None:
+            self.edit_summary.setText("–")
+            return
+        src, e = self.src_info, self.project.edit
+        fps = src.fps_float
+        total = fmt_time(src.num_frames / fps)
+        if e.keep:
+            kept = sum(b - a for a, b in e.keep)
+            when = tr("Keeps {kept} of {total} ({parts})", kept=fmt_time(kept / fps), total=total,
+                      parts=trn(len(e.keep), "{n} part", "{n} parts"))
+        else:
+            when = tr("The whole video ({total})", total=total)
+        if e.crop:
+            frame = tr("cropped to {w} × {h}", w=e.crop[2], h=e.crop[3])
+        else:
+            frame = tr("full frame {w} × {h}", w=src.width, h=src.height)
+        self.edit_summary.setText(f"{when}, {frame}.")
+
+    def _show_source_frame(self, img: np.ndarray | None) -> None:
+        f = self.frame
+        if img is None:
+            img = self.src_grabber.get(f)
+        if img is None:
+            return
+        self.view.set_image(img)
+        self.view.set_overlays([])
+        self.timeline.set_position(f)
+        n, fps = self.src_info.num_frames, self.src_info.fps_float
+        cut = self.cuts.removed_at(f)
+        self.pos_label.setText(f"{fmt_time(f / fps)} / {fmt_time(n / fps)}"
+                               + tr("   frame {f} / {last}", f=f, last=n - 1) + (tr("  · cut") if cut else ""))
+        self.cut_toggle_btn.setText(tr("Bring part back") if cut else tr("Remove part"))
 
     # ============================================================ corrections
     def _on_item_clicked(self, kind: str, ref: int, gpos) -> None:
@@ -932,7 +1316,7 @@ class MainWindow(QMainWindow):
         if self._stage is None or self._stage[0] != stage:
             self._stage = (stage, now, done)
         _, t0, d0 = self._stage
-        raw, stage = stage, tr(stage)
+        stage = tr(stage)
         self.job_label.setText(stage)
         if total <= 0:
             for bar in (self.progress, self.job_bar):
@@ -950,12 +1334,6 @@ class MainWindow(QMainWindow):
             bar.setValue(done)
         self.job_bar.setFormat(detail)
         self.progress.setFormat(f"{stage}  %p%")
-        if raw == "Detecting faces":
-            self.faces_note.setText(tr("Detecting faces: {pct}% ({done} of {total} frames)",
-                                       pct=100 * done // total, done=f"{done:,}", total=f"{total:,}")
-                                    + (tr(", about {left} left.", left=self._fmt_left((total - done) / rate))
-                                       if rate > 0 and elapsed >= 3 else ".")
-                                    + tr("\nYou can scrub the video meanwhile; results are cached for next time."))
 
     @staticmethod
     def _fmt_left(seconds: float) -> str:
@@ -968,8 +1346,6 @@ class MainWindow(QMainWindow):
 
     def _on_cancelled(self, label: str) -> None:
         self.status.setText(tr("{label} cancelled.", label=label))
-        if self.analysis is None:
-            self.faces_note.setText(tr("Face detection was cancelled. Use File › Detect faces again to restart it."))
 
     def _on_failed(self, msg: str) -> None:
         self.status.setText(tr("Failed: ") + msg.splitlines()[0])

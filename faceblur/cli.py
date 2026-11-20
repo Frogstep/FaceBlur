@@ -4,6 +4,7 @@
   python -m faceblur pick   VIDEO               scan faces, write the numbered face-card sheet
   python -m faceblur render VIDEO --blur 1,3    blur the faces on cards 1 and 3 (the rest stay visible)
   python -m faceblur render --project P.faceblur.json   render a project saved from the app
+  pick and render also take --keep 0:12-1:30,2:05- and --crop X,Y,W,H (cut & crop first)
   python -m faceblur check  MASKED --video SRC  safety pass on an already rendered file
   python -m faceblur serve  [--port 8765]       HTTP API for other devices (e.g. a phone app)
 """
@@ -44,22 +45,96 @@ class _Bar:
             self.bar = None
 
 
-def _open(video: Path):
-    from .pipeline import Analysis, get_analyzer, workdir
+def _open(video: Path, edit=None):
+    from .pipeline import Analysis, detections_cache, get_analyzer, open_video, workdir
 
     from .device import summary
 
     get_analyzer()
     print(summary())
-    if (workdir(video) / "detections.npz").exists():
+    info = open_video(video, edit)
+    if info.edited:
+        print(f"edited video: {info.num_frames} frames ({info.duration:.1f}s), {info.width}x{info.height}")
+    if detections_cache(workdir(video), info).exists():
         print(f"using cached detections in work/{video.stem}/")
     bar = _Bar()
-    analysis = Analysis.open(video, progress=bar)
+    analysis = Analysis.open(video, progress=bar, edit=edit)
     bar.close()
     if analysis.info.vfr:
         print(f"  warning: variable frame rate source; output uses a constant "
               f"{analysis.info.fps_float:.3f} fps")
     return analysis
+
+
+# ---------------------------------------------------------------- cut & crop
+
+def parse_time(text: str) -> float:
+    """Seconds from "90", "1:30", "1:30.5" or "1:02:03"."""
+    parts = text.strip().split(":")
+    if not 1 <= len(parts) <= 3 or any(not x for x in parts):
+        raise ValueError(f"not a time: {text!r}")
+    secs = 0.0
+    for x in parts:
+        secs = secs * 60 + float(x)
+    if secs < 0:
+        raise ValueError(f"not a time: {text!r}")
+    return secs
+
+
+def parse_keep(spec: str, fps: float, frames: int) -> list[list[int]]:
+    """"0:12-1:30,2:05-" -> [start, end) source frame ranges (an empty start is
+    the beginning of the video, an empty end its end)."""
+    out = []
+    for part in spec.replace(" ", "").split(","):
+        if not part:
+            continue
+        if part.count("-") != 1:
+            raise ValueError(f"a kept part is START-END, e.g. 0:12-1:30 (got {part!r})")
+        a, b = part.split("-")
+        start = round(parse_time(a) * fps) if a else 0
+        end = round(parse_time(b) * fps) if b else frames
+        if end <= start:
+            raise ValueError(f"the part {part!r} ends before it starts")
+        out.append([start, end])
+    if not out:
+        raise ValueError("--keep lists no parts")
+    return out
+
+
+def parse_crop(spec: str) -> list[int]:
+    try:
+        v = [int(round(float(x))) for x in spec.replace(" ", "").split(",")]
+    except ValueError:
+        v = []
+    if len(v) != 4 or v[2] <= 0 or v[3] <= 0:
+        raise ValueError(f"--crop is X,Y,WIDTH,HEIGHT in pixels, e.g. 0,420,1080,1080 (got {spec!r})")
+    return v
+
+
+def _edit_from_args(args, video: Path):
+    """The cut & crop given with --keep / --crop: (Edit, None) or (None, error)."""
+    from .project import Edit
+    from .video_io import probe
+
+    if not (args.keep or args.crop):
+        return Edit(), None
+    info = probe(video)
+    try:
+        edit = Edit(keep=parse_keep(args.keep, info.fps_float, info.num_frames) if args.keep else [],
+                    crop=parse_crop(args.crop) if args.crop else None)
+        info.with_edit(edit.keep, edit.crop)  # checks it leaves something
+    except ValueError as e:
+        return None, str(e)
+    return edit, None
+
+
+def _edit_flags(args) -> str:
+    out = ""
+    if args.keep:
+        out += f" --keep {args.keep}"
+    if args.crop:
+        out += f" --crop {args.crop}"
+    return out
 
 
 # ---------------------------------------------------------------------- pick
@@ -88,7 +163,11 @@ def contact_sheet(analysis, out: Path, thumb: int = 96) -> None:
 
 def cmd_pick(args) -> int:
     video = Path(args.video).resolve()
-    analysis = _open(video)
+    edit, err = _edit_from_args(args, video)
+    if err:
+        print(err)
+        return 1
+    analysis = _open(video, edit)
     if not analysis.cards:
         print("no faces found")
         return 1
@@ -102,7 +181,9 @@ def cmd_pick(args) -> int:
         fr = analysis.dets.frame[c.det_idx]
         print(f"  #{c.number}: {fr.min() / fps:.1f}s - {fr.max() / fps:.1f}s, {len(c.det_idx)} frames")
     print(f"\nNext, choose the cards to blur, e.g.:")
-    print(f"  python -m faceblur render {args.video} --blur 1,2,5")
+    print(f"  python -m faceblur render {args.video}{_edit_flags(args)} --blur 1,2,5")
+    if edit.active:
+        print("(give render the same --keep / --crop: card numbers belong to this cut)")
     return 0
 
 
@@ -140,10 +221,18 @@ def cmd_render(args) -> int:
         if args.blur:
             print("use either --project or --blur, not both")
             return 1
+        if args.keep or args.crop:
+            print("--keep / --crop apply to a new project; a saved project keeps its own cut & crop")
+            return 1
         project = Project.load(args.project)
         print(f"project: {args.project} ({len(project.exclusions)} exclusions, {len(project.manual)} drawn boxes)")
     elif args.video and args.blur:
         project = Project.new(args.video)
+        edit, err = _edit_from_args(args, Path(project.video))
+        if err:
+            print(err)
+            return 1
+        project.edit = edit
     else:
         print("give a VIDEO with --blur CARDS (see `pick`), or --project FILE")
         return 1
@@ -158,7 +247,7 @@ def cmd_render(args) -> int:
     if args.no_sam:
         s.use_sam = False
 
-    analysis = _open(Path(project.video))
+    analysis = _open(Path(project.video), project.edit)
     if not args.project:
         err = _blur_from_args(project, analysis, args)
         if err:
@@ -249,11 +338,18 @@ def main(argv=None) -> int:
     g.add_argument("path", nargs="?", help="video or .faceblur.json project to open")
     g.set_defaults(fn=cmd_gui)
 
-    p = sub.add_parser("pick", parents=[common], help="find faces and write the numbered face-card sheet")
+    edit = argparse.ArgumentParser(add_help=False)
+    edit.add_argument("--keep", metavar="RANGES",
+                      help="cut: keep only these parts, e.g. 0:12-1:30,2:05- (times as [h:]m:s or seconds; "
+                           "an open end means the end of the video). Faces are only looked for there.")
+    edit.add_argument("--crop", metavar="X,Y,W,H",
+                      help="crop to this rectangle in pixels (rounded to even numbers), e.g. 0,420,1080,1080")
+
+    p = sub.add_parser("pick", parents=[common, edit], help="find faces and write the numbered face-card sheet")
     p.add_argument("video")
     p.set_defaults(fn=cmd_pick)
 
-    r = sub.add_parser("render", parents=[common], help="blur the chosen faces and encode H.265")
+    r = sub.add_parser("render", parents=[common, edit], help="blur the chosen faces and encode H.265")
     r.add_argument("video", nargs="?")
     r.add_argument("--blur", "--face", dest="blur", action="append", metavar="N[,N...]",
                    help="card numbers (from `pick`) to blur, e.g. --blur 1,2,5; every other face stays visible")

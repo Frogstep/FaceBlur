@@ -151,7 +151,8 @@ faster. Detections cached on one machine are valid on another.
 
 Nothing heavy travels with the app: the installer downloads it on the target PC.
 
-1. On this PC, build the zip (under 100 KB):
+1. On this PC, build the zip (about 150 KB), or download the newest release from
+   <https://github.com/Frogstep/FaceBlur-releases/releases/latest>:
 
    ```bash
    .venv/Scripts/python install/make_dist.py
@@ -187,6 +188,44 @@ Check an installation at any time with `.venv/Scripts/python -m faceblur.setup_m
 (`.venv/bin/python` on Linux).
 Package versions are pinned in `install/requirements-<windows|linux>-<gpu|cpu>.txt`; after
 changing `install/requirements.in`, regenerate them with `make_dist.py --lock`.
+
+## Updates
+
+New versions are published as releases of the public repo
+[Frogstep/FaceBlur-releases](https://github.com/Frogstep/FaceBlur-releases), which holds
+only the release zips (this source repo stays private).
+
+**Publish (this PC):** commit your changes, then run **`publish.bat`**. It needs the
+[GitHub CLI](https://cli.github.com/) (`gh auth login` once). It:
+- numbers the version by date (`2026.11.20`, then `2026.11.20.2` for a second release
+  that day) and writes it into `faceblur/_version.py` inside the zip only
+- builds the zip and a `version.json` (version, SHA-256, notes) in `dist/`
+- asks for a one-line note and a confirmation, then uploads both as a release and tags
+  the commit `v<version>` locally
+- the first time, offers to create the releases repo
+
+`publish.bat --dry-run` only builds the files. Uncommitted changes to the shipped files
+(`faceblur/`, `install/`, the scripts, README) stop it, so each release matches a commit.
+
+**Update (the other PC):** close FaceBlur and its server, then run **`update.bat`**
+(`./update.sh` on Linux). It reads `version.json` of the newest release; if it is newer
+than the installed version (shown under **Help** in the app), it downloads the zip,
+checks its SHA-256 and replaces the app's own files: `faceblur/`, the scripts, README and
+the package locks. Models, `.venv`, projects, `work/`, `jobs/`, `history/`, `out/`,
+`server_token.txt` and the app settings are not touched. If the new version needs other
+Python packages, the installer runs again by itself (it downloads only what changed); if
+only the model list changed, just the model download runs.
+
+- `update.bat --check`: only say whether a newer version exists
+- `update.bat FaceBlur-<version>.zip` (or drag the zip onto it): install from a zip
+  copied by hand, e.g. on a PC without internet (it still needs the internet if the
+  version needs new packages)
+- `update.bat --rollback`: go back to the previous version, kept in `update/backup/`
+  (projects saved by the newer version may not open in the older one)
+
+An install from a zip made before the updater existed has no `update.bat`: unzip the
+new release over its folder once, replacing the files. The updater refuses to run in a
+git checkout.
 
 ## Development setup
 

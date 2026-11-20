@@ -47,7 +47,10 @@ def trn(n: int, one: str, many: str, **kw) -> str:
 
 
 HELP_EN = (
-    "1. File > Open a video. Faces are detected once and cached.\n\n"
+    "1. File > Open a video. Before faces are detected you can cut and crop it: drag the corners of the "
+    "frame to crop, split the timeline at the playhead (S) and remove the parts you don't need (Delete), "
+    "or cut the start and end (I / O). Then click Detect faces: faces are only looked for in what is "
+    "left, and they are cached.\n\n"
     "2. In the Review faces tab, every face starts as not blurred. Click the faces you want to blur; "
     "click again to leave a face visible. A card is one face followed continuously, so one person "
     "can have several cards: click each of them.\n\n"
@@ -147,6 +150,7 @@ _RU = {
     "Videos": "Видео",
     "All files": "Все файлы",
     "Open video or project": "Открыть видео или проект",
+    "Open video or project…": "Открыть видео или проект…",
     "Video or project": "Видео или проект",
     "Cannot open": "Не удалось открыть",
     "Save failed": "Не удалось сохранить",
@@ -167,6 +171,7 @@ _RU = {
     "Preparing face cards": "Подготовка карточек лиц",
     "Loading SAM 2": "Загрузка SAM 2",
     "Rendering": "Рендер",
+    "Saving the video": "Сохранение видео",
     "Note: variable frame rate video; the output will use a constant frame rate.":
         "Примечание: у видео переменная частота кадров; результат будет с постоянной частотой.",
     "Found {cards} in {frames} frames.": "Найдено карточек лиц: {n} (кадров в видео: {frames}).",
@@ -196,7 +201,7 @@ _RU = {
     "No faces found. You can still drag boxes onto the video to blur areas.":
         "Лица не найдены. Вы всё равно можете рисовать рамки на видео, чтобы размыть области.",
     "Click the faces to blur in the Review faces tab.": "Нажмите на лица, которые нужно размыть, на вкладке «Проверка лиц».",
-    "Review faces ({n} blurred)": "Проверка лиц (размыто: {n})",
+    "Review faces ({n} blurred)": "Проверка лиц (размыть: {n})",
 
     # ---- corrections / overlays / context menus
     "whole track": "весь трек",
@@ -249,8 +254,8 @@ _RU = {
     "Click to blur this face, or to leave it visible": "Щёлкните, чтобы размыть это лицо или оставить его видимым",
     "Show in video": "Показать в видео",
     "Show this face in the video": "Показать это лицо в видео",
-    "BLURRED": "РАЗМЫТО",
-    "Not blurred": "Не размыто",
+    "BLURRED": "РАЗМЫТЬ",
+    "Not blurred": "Не размывать",
     "Every face stays visible until you choose to blur it. <b>Click a face to blur it</b>; click it again to "
     "leave it visible. Keys: <b>↑/↓</b> move, <b>Space</b> switch, <b>Enter</b> show in the video.":
         "Все лица остаются видимыми, пока вы не решите их размыть. <b>Щёлкните по лицу, чтобы размыть его</b>; "
@@ -261,12 +266,75 @@ _RU = {
     "Remove the blur from all {n} faces?": "Убрать размытие со всех лиц ({n})?",
     "Show": "Показать",
     "All faces": "Все лица",
-    "Blurred": "Размыто",
+    "Blurred": "Размыть",
     "No faces were found in this video.": "В этом видео лица не найдены.",
+
+    # ---- cut & crop
+    "⇤ Start here": "⇤ Начать здесь",
+    "Cut everything before the playhead (I)": "Вырезать всё до позиции воспроизведения (I)",
+    "End here ⇥": "Закончить здесь ⇥",
+    "Cut everything after the playhead (O)": "Вырезать всё после позиции воспроизведения (O)",
+    "Split": "Разрезать",
+    "Undo": "Отменить",
+    "Redo": "Повторить",
+    "Split the part under the playhead (S)": "Разрезать часть в позиции воспроизведения (S)",
+    "Remove part": "Удалить часть",
+    "Bring part back": "Вернуть часть",
+    "Remove the part under the playhead, or bring it back (Delete)":
+        "Удалить часть в позиции воспроизведения или вернуть её (Delete)",
+    "Crop": "Кадр",
+    "Free": "Свободно",
+    "Shape of the crop": "Пропорции кадра",
+    "Full frame": "Весь кадр",
+    "Remove the crop": "Убрать кадрирование",
+    "Undo (Ctrl+Z)": "Отменить (Ctrl+Z)",
+    "Redo (Ctrl+Y)": "Повторить (Ctrl+Y)",
+    "Crop: drag the corners or edges of the frame (drag outside it to draw a new crop). "
+    "Cut: split at the playhead (S) and remove the parts you don't need (Delete), or cut the "
+    "start and end (I / O). Faces are only looked for in what is left.":
+        "Кадр: тяните за углы или края кадра (протяните снаружи, чтобы нарисовать новый). "
+        "Обрезка: разрежьте в позиции воспроизведения (S) и удалите ненужные части (Delete) или обрежьте "
+        "начало и конец (I / O). Лица ищутся только в том, что осталось.",
+    "Cut & crop": "Обрезка и кадр",
+    "Change cut & crop…": "Изменить обрезку и кадр…",
+    "Detect faces  ▶": "Найти лица  ▶",
+    "Back to the faces (nothing changed)": "Вернуться к лицам (без изменений)",
+    "Cut and crop the video if you need to, then click Detect faces.":
+        "При необходимости обрежьте и кадрируйте видео, затем нажмите «Найти лица».",
+    "Changing the cut or crop means detecting the faces again. This clears your choices "
+    "({faces} chosen to blur, {fixes} corrections). Continue?":
+        "После изменения обрезки или кадра лица придётся искать заново. Ваш выбор будет сброшен "
+        "(выбрано для размытия: {faces}, исправлений: {fixes}). Продолжить?",
+    "At least one part of the video must stay.": "Хотя бы одна часть видео должна остаться.",
+    "Keeps {kept} of {total} ({parts})": "Остаётся {kept} из {total} ({parts})",
+    "The whole video ({total})": "Всё видео ({total})",
+    "cropped to {w} × {h}": "кадр {w} × {h}",
+    "full frame {w} × {h}": "весь кадр {w} × {h}",
+    "  · cut": "  · вырезано",
+
+    # ---- reset
+    "Reset project…": "Сбросить проект…",
+    "Reset project": "Сброс проекта",
+    "Start over with this video: deletes the detected faces, your choices, corrections, cut & crop and the "
+    "work folder": "Начать с этим видео заново: удаляет найденные лица, ваш выбор, исправления, обрезку и кадр, "
+                   "а также рабочую папку",
+    "Reset the project for {name}?\n\n"
+    "This deletes the detected faces, your choice of faces to blur, the corrections, "
+    "the cut & crop and the settings, and the work folder:\n{work}\n\n"
+    "The video itself and rendered videos are kept. This cannot be undone.":
+        "Сбросить проект для {name}?\n\n"
+        "Будут удалены найденные лица, выбор лиц для размытия, исправления, обрезка и кадр, настройки, "
+        "а также рабочая папка:\n{work}\n\n"
+        "Само видео и готовые результаты останутся. Отменить это нельзя.",
+    "Could not delete everything:": "Не удалось удалить всё:",
+    "Project reset: {name} is open as a new video.": "Проект сброшен: {name} открыто как новое видео.",
 
     # ---- help
     HELP_EN: (
-        "1. Файл > Открыть видео. Лица ищутся один раз и сохраняются в кэш.\n\n"
+        "1. Файл > Открыть видео. До поиска лиц видео можно обрезать: потяните за углы кадра, чтобы "
+        "кадрировать, разрежьте шкалу в позиции воспроизведения (S) и удалите ненужные части (Delete) "
+        "или обрежьте начало и конец (I / O). Затем нажмите «Найти лица»: лица ищутся только в "
+        "оставшейся части и сохраняются в кэш.\n\n"
         "2. На вкладке «Проверка лиц» все лица сначала не размыты. Нажмите на лица, которые нужно размыть; "
         "повторное нажатие оставляет лицо видимым. Карточка — это одно лицо, которое непрерывно отслеживается, "
         "поэтому у одного человека может быть несколько карточек: нажмите на каждую.\n\n"
@@ -288,11 +356,12 @@ _PLURALS = {
     "ru": {
         "{n} face card": ("{n} карточка лица", "{n} карточки лица", "{n} карточек лица"),
         "{n} frame": ("{n} кадр", "{n} кадра", "{n} кадров"),
-        "{n} of {total} faces will be blurred": ("Будет размыто {n} лицо из {total}", "Будет размыто {n} лица из {total}",
-                                                "Будет размыто {n} лиц из {total}"),
-        "<b>{n}</b> of {total} faces will be blurred.": ("Будет размыто <b>{n}</b> лицо из {total}.",
-                                                       "Будет размыто <b>{n}</b> лица из {total}.",
-                                                       "Будет размыто <b>{n}</b> лиц из {total}."),
+        "{n} part": ("{n} часть", "{n} части", "{n} частей"),
+        "{n} of {total} faces will be blurred": ("Размыть {n} лицо из {total}", "Размыть {n} лица из {total}",
+                                                "Размыть {n} лиц из {total}"),
+        "<b>{n}</b> of {total} faces will be blurred.": ("Размыть <b>{n}</b> лицо из {total}.",
+                                                       "Размыть <b>{n}</b> лица из {total}.",
+                                                       "Размыть <b>{n}</b> лиц из {total}."),
         "Plus {n} drawn area.": ("Плюс {n} нарисованная область.", "Плюс {n} нарисованные области.",
                                  "Плюс {n} нарисованных областей."),
     },

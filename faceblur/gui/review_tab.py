@@ -57,10 +57,12 @@ class CardRow(QFrame):
                 THUMB, THUMB, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
             h.addWidget(t)
         h.addStretch(1)
-        self.blur = False
-        self.current = False
+        self.blur = None
+        self.current = None
 
     def set_state(self, blur: bool, current: bool) -> None:
+        if (blur, current) == (self.blur, self.current):
+            return  # restyling hundreds of rows is slow; touch only the changed ones
         self.blur, self.current = blur, current
         red, green = BLUR_COLOR.name(), KEEP_COLOR.name()
         if blur:
@@ -174,7 +176,9 @@ class ReviewPanel(QWidget):
         mode = self.filter.currentData()
         for r in self.rows:
             blur = self.blurred[r.pos] if r.pos < len(self.blurred) else False
-            r.setVisible(mode == "all" or (mode == "blur") == blur)
+            show = mode == "all" or (mode == "blur") == blur
+            if r.isHidden() == show:
+                r.setVisible(show)
 
     # ---------------------------------------------------------------- switching
     def _on_clicked(self, pos: int) -> None:

@@ -22,7 +22,9 @@ class PipelineOps:
     def scan(self, job: Job, progress, cancel) -> None:
         from ..pipeline import Analysis, card_thumbnails
 
-        analysis = Analysis.open(job.video, progress=progress, cancel=cancel, wd=job.work)
+        with job.lock:
+            edit = job.load_project().edit
+        analysis = Analysis.open(job.video, progress=progress, cancel=cancel, wd=job.work, edit=edit)
         thumbs = card_thumbnails(analysis, THUMB, progress=progress, cancel=cancel)
         job.store.put_analysis(job, analysis, thumbs)
 

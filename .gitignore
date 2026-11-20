@@ -13,3 +13,5 @@ dist/
 jobs/
 server_token.txt
 history/
+faceblur/_version.py
+update/

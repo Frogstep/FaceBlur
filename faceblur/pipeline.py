@@ -9,8 +9,11 @@ Long operations take progress(stage, done, total) and cancel() -> bool hooks.
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -18,7 +21,7 @@ from typing import Callable
 import numpy as np
 
 from .identity import Cancelled, Detections, ManualBox, TargetPlan, plan_labeled, scan, similarity
-from .project import Label, Project
+from .project import Edit, Label, Project
 from .review import (BLUR, SOMEONE_ELSE, UNLABELED, Card, build_cards, card_of_detection, chain_cards, is_blur,
                      person_refs)
 from .video_io import FrameReader, FrameWriter, VideoInfo, probe
@@ -28,6 +31,44 @@ Progress = Callable[[str, int, int], None]
 Cancel = Callable[[], bool]
 
 __all__ = ["Analysis", "Cancelled", "RenderResult", "render", "safety_check", "get_analyzer", "workdir"]
+
+
+TEMP_KEEP_DAYS = 2  # leftovers older than this (e.g. from a crash) are deleted
+
+
+def temp_dir() -> Path:
+    """The app's folder in the system temp directory (%TEMP%\\FaceBlur on Windows),
+    for videos while they are being written. Removes stale leftovers."""
+    d = Path(tempfile.gettempdir()) / "FaceBlur"
+    d.mkdir(parents=True, exist_ok=True)
+    old = time.time() - TEMP_KEEP_DAYS * 86400
+    for p in d.glob("*.partial.*"):
+        try:
+            if p.stat().st_mtime < old:
+                p.unlink()
+        except OSError:  # in use by another render, or already gone
+            pass
+    return d
+
+
+def detections_cache(wd: Path, info: VideoInfo) -> Path:
+    """Cached detections for this cut & crop (a changed edit is scanned again)."""
+    key = info.edit_key()
+    return wd / (f"detections_{key}.npz" if key else "detections.npz")
+
+
+def clear_scan_cache(wd: Path) -> None:
+    """Forget the detections and card thumbnails of every edit."""
+    for p in [*wd.glob("detections*.npz"), *wd.glob("thumbs_*.npz")]:
+        p.unlink(missing_ok=True)
+
+
+def open_video(video: str | Path, edit: Edit | None = None) -> VideoInfo:
+    """probe() with the project's cut & crop applied."""
+    info = probe(video)
+    if edit is not None and edit.active:
+        info = info.with_edit(edit.keep, edit.crop)
+    return info
 
 
 def workdir(video: str | Path, root: str | Path | None = None) -> Path:
@@ -102,15 +143,17 @@ class Analysis:
         self.cards: list[Card] = build_cards(dets)
         self.card_of_det = card_of_detection(dets, self.cards)
         self._frame_index = dets.by_frame()
+        self._plan_cache: dict[tuple, TargetPlan] = {}
 
     @classmethod
     def open(cls, video: str | Path, progress: Progress | None = None, cancel: Cancel | None = None,
-             wd: str | Path | None = None) -> "Analysis":
-        """wd: cache folder (default work/<video name>/, see workdir)."""
+             wd: str | Path | None = None, edit: Edit | None = None) -> "Analysis":
+        """wd: cache folder (default work/<video name>/, see workdir); edit: the
+        project's cut & crop (faces are only looked for in the edited video)."""
         video = Path(video).resolve()
-        info = probe(video)
+        info = open_video(video, edit)
         wd = workdir(video, wd)
-        cache = wd / "detections.npz"
+        cache = detections_cache(wd, info)
         if cache.exists():
             dets = Detections.load(cache)
         else:
@@ -208,8 +251,25 @@ class Analysis:
         """One masking plan per track of blurred cards and per drawn box."""
         inputs, det_label = self.tracks(project)
         excluded = self.excluded(project)
-        plans = [plan_labeled(self.dets, det_label, p.index, self.info.fps_float,
-                              excluded=excluded, manual=p.manual) for p in inputs]
+        # A track's plan depends only on its own cards (or drawn box) and the
+        # exclusions: every other card's detections count as "someone else"
+        # whether blurred or not. So switching one card reuses the other plans
+        # instead of re-planning every track (seconds with hundreds of cards).
+        ex_key = frozenset(excluded)
+        cache = getattr(self, "_plan_cache", None)
+        if cache is None:
+            cache = self._plan_cache = {}
+        plans = []
+        for p in inputs:
+            key = (tuple(p.cards), tuple((m.frame, tuple(m.box.tolist()), m.span) for m in p.manual), ex_key)
+            plan = cache.get(key)
+            if plan is None:
+                plan = plan_labeled(self.dets, det_label, p.index, self.info.fps_float,
+                                    excluded=excluded, manual=p.manual)
+                if len(cache) > 4000:
+                    cache.clear()
+                cache[key] = plan
+            plans.append(plan)
         return inputs, plans
 
 
@@ -234,7 +294,8 @@ def card_thumbnails(analysis: Analysis, size: int = 96, progress: Progress | Non
     (one frame seek per distinct frame)."""
     from .video_io import FrameGrabber
 
-    cache = analysis.wd / f"thumbs_{size}.npz"
+    key = analysis.info.edit_key()
+    cache = analysis.wd / (f"thumbs_{size}_{key}.npz" if key else f"thumbs_{size}.npz")
     want = sorted({i for c in analysis.cards for i in c.samples})
     if cache.exists():
         z = np.load(cache)
@@ -313,7 +374,9 @@ def render(project: Project, analysis: Analysis, progress: Progress | None = Non
     per_frame = []
     t0 = time.time()
     debug_w = FrameWriter(wd / "debug.mp4", info, cq=28) if debug else None
-    tmp = out.with_name(out.stem + ".partial" + out.suffix)
+    # written in the temp folder and moved into place when complete, so a
+    # cancelled or failed render never leaves half a video next to the output
+    tmp = temp_dir() / f"{out.stem}.{uuid.uuid4().hex[:8]}.partial{out.suffix}"
     try:
         with FrameWriter(tmp, info, cq=s.cq) as writer:
             for f, (frame, sam_mask, status) in enumerate(stream):
@@ -338,8 +401,14 @@ def render(project: Project, analysis: Analysis, progress: Progress | None = Non
         raise
     if debug_w:
         debug_w.close()
-    out.unlink(missing_ok=True)
-    tmp.rename(out)
+    if progress:  # a copy when the temp folder is on another drive (seconds for a large video)
+        progress("Saving the video", 0, 0)
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.unlink(missing_ok=True)
+        shutil.move(tmp, out)
+    finally:
+        tmp.unlink(missing_ok=True)  # left over only when the move failed
     dt = max(time.time() - t0, 1e-6)
     log_path = wd / "render_log.json"
     log_path.write_text(json.dumps({"output": str(out), "sam": stats, "frames": per_frame}, indent=1), encoding="utf-8")

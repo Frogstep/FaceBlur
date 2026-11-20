@@ -5,6 +5,10 @@
 
 On the other PC: unzip, run install.bat (Windows) or ./install.sh (Linux), then
 FaceBlur.bat or ./FaceBlur.sh.
+
+publish.bat (install/publish.py) builds the same zip with a version number written into
+faceblur/_version.py and uploads it as a GitHub release; update.bat / ./update.sh on the
+other PC installs the newest release (install/update.py).
 """
 
 from __future__ import annotations
@@ -24,8 +28,10 @@ INSTALL = ROOT / "install"
 PLATFORMS = {"windows": "windows", "linux": "x86_64-manylinux_2_34"}  # uv --python-platform
 ONNXRUNTIME = {"gpu": "onnxruntime-gpu==1.32.0", "cpu": "onnxruntime==1.32.0"}
 LOCKS = [f"install/requirements-{p}-{v}.txt" for p in PLATFORMS for v in ONNXRUNTIME]
-SCRIPTS = ["install.bat", "FaceBlur.bat", "FaceBlurServer.bat", "install.sh", "FaceBlur.sh"]
-FILES = SCRIPTS + ["README.md"] + LOCKS
+SCRIPTS = ["install.bat", "FaceBlur.bat", "FaceBlurServer.bat", "update.bat",
+           "install.sh", "FaceBlur.sh", "update.sh"]
+FILES = SCRIPTS + ["README.md", "install/update.py"] + LOCKS
+VERSION_FILE = ROOT / "faceblur" / "_version.py"  # only inside published zips
 
 
 def lock() -> None:
@@ -45,31 +51,39 @@ def lock() -> None:
                 print(f"locked {out.relative_to(ROOT)}")
 
 
-def _entry(z: zipfile.ZipFile, path: Path) -> None:
+def _entry(z: zipfile.ZipFile, path: Path, data: bytes | None = None) -> None:
     """Add one file with Unix permissions (scripts executable) and the line endings
-    its shell needs (CRLF for .bat, LF for everything else), whatever git checked out."""
-    data = path.read_bytes()
+    its shell needs (CRLF for .bat, LF for everything else), whatever git checked out.
+    With data, that is written instead of the file's content (the file need not exist)."""
+    if data is None:
+        data = path.read_bytes()
     if path.suffix in (".bat", ".sh", ".py", ".txt", ".md", ".in"):
         data = data.replace(b"\r\n", b"\n")
         if path.suffix == ".bat":
             data = data.replace(b"\n", b"\r\n")
     info = zipfile.ZipInfo(str(Path("FaceBlur") / path.relative_to(ROOT)).replace("\\", "/"),
-                           date_time=time.localtime(path.stat().st_mtime)[:6])
+                           date_time=time.localtime(path.stat().st_mtime if path.exists() else None)[:6])
     info.create_system = 3  # Unix, so unzip applies the mode below
     info.external_attr = (0o100755 if path.suffix == ".sh" else 0o100644) << 16
     info.compress_type = zipfile.ZIP_DEFLATED
     z.writestr(info, data)
 
 
-def build() -> Path:
-    out = ROOT / "dist" / f"FaceBlur-{datetime.date.today():%Y-%m-%d}.zip"
-    out.parent.mkdir(exist_ok=True)
+def build(version: str | None = None, out_dir: Path | None = None) -> Path:
+    """Build the zip in out_dir (default dist/). With a version, the zip is named after it
+    and the version is written into faceblur/_version.py inside the zip (the working tree
+    is not changed)."""
+    out = (out_dir or ROOT / "dist") / f"FaceBlur-{version or f'{datetime.date.today():%Y-%m-%d}'}.zip"
+    out.parent.mkdir(parents=True, exist_ok=True)
     code = [p for p in (ROOT / "faceblur").rglob("*")
-            if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"]
+            if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc" and p != VERSION_FILE]
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for p in code + [ROOT / f for f in FILES]:
             _entry(z, p)
-    print(f"{out.relative_to(ROOT)}: {len(code) + len(FILES)} files, {out.stat().st_size / 1e3:,.0f} KB")
+        if version:
+            _entry(z, VERSION_FILE, f'__version__ = "{version}"\n'.encode())
+    count = len(code) + len(FILES) + bool(version)
+    print(f"{out}: {count} files, {out.stat().st_size / 1e3:,.0f} KB")
     return out
 
 

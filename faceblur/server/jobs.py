@@ -287,7 +287,9 @@ class JobStore:
                 return self._cache[jid][0]
         if not job.state.scanned:
             raise LookupError("faces have not been detected yet")
-        a = Analysis.open(job.video, wd=job.work)  # loads the cached detections only
+        with job.lock:
+            edit = job.load_project().edit
+        a = Analysis.open(job.video, wd=job.work, edit=edit)  # loads the cached detections only
         with self._cache_lock:
             self._cache[jid] = (a, None)
             while len(self._cache) > self._cache_size:

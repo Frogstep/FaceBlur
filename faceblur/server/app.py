@@ -413,8 +413,9 @@ def create_app(store: JobStore, worker: Worker, token: str, max_upload: int = 8 
         job = get_job(job_id)
         if job.busy:
             raise HTTPException(409, f"job is busy (status: {job.state.status})")
-        for p in [job.work / "detections.npz", *job.work.glob("thumbs_*.npz")]:
-            p.unlink(missing_ok=True)
+        from ..pipeline import clear_scan_cache
+
+        clear_scan_cache(job.work)
         with job.lock:
             project = job.load_project()
             project.labels.clear()

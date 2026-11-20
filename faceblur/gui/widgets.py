@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from .i18n import tr
@@ -40,12 +40,25 @@ class Overlay:
     ref: int = -1  # detection index or manual-box index
 
 
+CROP_MIN = 32  # smallest crop the handles allow, in video pixels
+_HANDLE = 7  # half size of a crop handle, in screen pixels
+_CURSORS = {"nw": Qt.CursorShape.SizeFDiagCursor, "se": Qt.CursorShape.SizeFDiagCursor,
+            "ne": Qt.CursorShape.SizeBDiagCursor, "sw": Qt.CursorShape.SizeBDiagCursor,
+            "n": Qt.CursorShape.SizeVerCursor, "s": Qt.CursorShape.SizeVerCursor,
+            "w": Qt.CursorShape.SizeHorCursor, "e": Qt.CursorShape.SizeHorCursor,
+            "move": Qt.CursorShape.SizeAllCursor}
+
+
 class VideoView(QWidget):
     """Shows one frame with overlays. Click a box -> itemClicked; drag on the
-    frame -> boxDrawn (both carry the global mouse position for a menu)."""
+    frame -> boxDrawn (both carry the global mouse position for a menu).
+
+    In crop mode it shows a crop rectangle instead: drag its corners or edges,
+    drag inside to move it, drag outside to draw a new one -> cropChanged."""
 
     itemClicked = Signal(str, int, QPoint)
     boxDrawn = Signal(list, QPoint)
+    cropChanged = Signal(object)  # (x, y, w, h) in video pixels
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -58,6 +71,11 @@ class VideoView(QWidget):
         self._drag_to: QPointF | None = None
         self._message = tr("Open a video to start (File > Open, or drop a file here)")
         self.drawing_enabled = True
+        # crop mode
+        self.crop_mode = False
+        self.crop_aspect: float | None = None  # width / height, or None = free
+        self._crop: tuple[float, float, float, float] | None = None  # None = full frame
+        self._crop_drag: tuple | None = None  # (handle, press point in video px, rect at press)
 
     # ----------------------------------------------------------- content
     def set_image(self, img: np.ndarray | None) -> None:
@@ -71,6 +89,23 @@ class VideoView(QWidget):
     def set_message(self, text: str) -> None:
         self._message = text
         self.update()
+
+    def set_crop_mode(self, on: bool) -> None:
+        self.crop_mode = on
+        self._crop_drag = None
+        self._drag_from = self._drag_to = None
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def set_crop(self, crop) -> None:
+        self._crop = tuple(float(v) for v in crop) if crop else None
+        self.update()
+
+    def crop_rect(self) -> tuple[float, float, float, float]:
+        """The crop in video pixels (the full frame when there is none)."""
+        if self._crop is not None:
+            return self._crop
+        return (0.0, 0.0, float(self._pix.width()), float(self._pix.height())) if self._pix else (0, 0, 0, 0)
 
     # ----------------------------------------------------------- geometry
     def _frame_rect(self) -> QRectF:
@@ -140,16 +175,125 @@ class VideoView(QWidget):
         if self._drag_from is not None and self._drag_to is not None:
             p.setPen(QPen(QColor("#ff5cf0"), 2, Qt.PenStyle.DashLine))
             p.drawRect(QRectF(self._drag_from, self._drag_to).normalized())
+        if self.crop_mode:
+            self._paint_crop(p)
+
+    def _crop_view_rect(self) -> QRectF:
+        x, y, w, h = self.crop_rect()
+        return self._view_rect((x, y, x + w, y + h))
+
+    def _handles(self) -> dict[str, QPointF]:
+        r = self._crop_view_rect()
+        pts = {"nw": r.topLeft(), "ne": r.topRight(), "sw": r.bottomLeft(), "se": r.bottomRight()}
+        if self.crop_aspect is None:  # edges change one side, which would break a fixed aspect
+            c = r.center()
+            pts.update(n=QPointF(c.x(), r.top()), s=QPointF(c.x(), r.bottom()),
+                       w=QPointF(r.left(), c.y()), e=QPointF(r.right(), c.y()))
+        return pts
+
+    def _paint_crop(self, p: QPainter) -> None:
+        frame, r = self._frame_rect(), self._crop_view_rect()
+        shade = QColor(0, 0, 0, 160)
+        p.fillRect(QRectF(frame.left(), frame.top(), frame.width(), r.top() - frame.top()), shade)
+        p.fillRect(QRectF(frame.left(), r.bottom(), frame.width(), frame.bottom() - r.bottom()), shade)
+        p.fillRect(QRectF(frame.left(), r.top(), r.left() - frame.left(), r.height()), shade)
+        p.fillRect(QRectF(r.right(), r.top(), frame.right() - r.right(), r.height()), shade)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(255, 255, 255, 70), 1))  # rule of thirds
+        for k in (1, 2):
+            x = r.left() + r.width() * k / 3
+            y = r.top() + r.height() * k / 3
+            p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
+            p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
+        p.setPen(QPen(QColor(255, 255, 255), 2))
+        p.drawRect(r)
+        p.setBrush(QColor(255, 255, 255))
+        for pt in self._handles().values():
+            p.drawRect(QRectF(pt.x() - _HANDLE + 2, pt.y() - _HANDLE + 2, 2 * _HANDLE - 4, 2 * _HANDLE - 4))
+        _, _, w, h = self.crop_rect()
+        label = f"{int(w) // 2 * 2} × {int(h) // 2 * 2}"
+        fm = p.fontMetrics()
+        tag = QRectF(r.x() + 6, r.y() + 6, fm.horizontalAdvance(label) + 10, fm.height() + 4)
+        p.fillRect(tag, QColor(0, 0, 0, 170))
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(tag, Qt.AlignmentFlag.AlignCenter, label)
+
+    def _crop_hit(self, pos: QPointF) -> str | None:
+        for name, pt in self._handles().items():
+            if abs(pos.x() - pt.x()) <= _HANDLE + 2 and abs(pos.y() - pt.y()) <= _HANDLE + 2:
+                return name
+        if self._crop_view_rect().contains(pos):
+            return "move"
+        return None
+
+    def _crop_drag_to(self, pos: QPointF) -> None:
+        handle, (px, py), (x, y, w, h) = self._crop_drag
+        W, H = float(self._pix.width()), float(self._pix.height())
+        vx, vy = self.to_video(pos)
+        mn = min(CROP_MIN, W, H)
+        if handle == "move":
+            nx = min(max(x + vx - px, 0.0), W - w)
+            ny = min(max(y + vy - py, 0.0), H - h)
+            self._crop = (nx, ny, w, h)
+            return
+        if handle == "new" or len(handle) == 2:  # a corner: the opposite corner stays put
+            if handle == "new":
+                ax, ay = px, py
+            else:
+                ax = x + w if "w" in handle else x
+                ay = y + h if "n" in handle else y
+            right, down = vx >= ax, vy >= ay
+            room_w = (W - ax) if right else ax
+            room_h = (H - ay) if down else ay
+            nw, nh = abs(vx - ax), abs(vy - ay)
+            ar = self.crop_aspect
+            if ar:
+                nw = max(nw, nh * ar)
+                nw = min(nw, room_w, room_h * ar)
+                nw = max(nw, min(mn, room_w, room_h * ar))
+                nh = nw / ar
+            else:
+                nw = min(max(nw, min(mn, room_w)), room_w)
+                nh = min(max(nh, min(mn, room_h)), room_h)
+            self._crop = (ax if right else ax - nw, ay if down else ay - nh, nw, nh)
+            return
+        # an edge (free aspect only)
+        x1, y1, x2, y2 = x, y, x + w, y + h
+        if handle == "w":
+            x1 = min(max(vx, 0.0), x2 - mn)
+        elif handle == "e":
+            x2 = max(min(vx, W), x1 + mn)
+        elif handle == "n":
+            y1 = min(max(vy, 0.0), y2 - mn)
+        elif handle == "s":
+            y2 = max(min(vy, H), y1 + mn)
+        self._crop = (x1, y1, x2 - x1, y2 - y1)
 
     # ----------------------------------------------------------- mouse
     def mousePressEvent(self, e):
         if self._pix is None or e.button() != Qt.MouseButton.LeftButton:
+            return
+        if self.crop_mode:
+            hit = self._crop_hit(e.position())
+            if hit is None and not self._frame_rect().contains(e.position()):
+                return
+            self._crop_drag = (hit or "new", self.to_video(e.position()), self.crop_rect())
             return
         if self._frame_rect().contains(e.position()):
             self._drag_from = e.position()
             self._drag_to = None
 
     def mouseMoveEvent(self, e):
+        if self.crop_mode:
+            if self._crop_drag is not None:
+                if self._crop_drag[0] == "new" and (e.position() - self.to_view(*self._crop_drag[1])).manhattanLength() < 6:
+                    return  # a click, not a drag
+                self._crop_drag_to(e.position())
+                self.update()
+            elif self._pix is not None:
+                hit = self._crop_hit(e.position())
+                self.setCursor(_CURSORS.get(hit, Qt.CursorShape.CrossCursor))
+            return
         if self._drag_from is not None and self.drawing_enabled:
             if (e.position() - self._drag_from).manhattanLength() > 6:
                 self._drag_to = e.position()
@@ -160,6 +304,13 @@ class VideoView(QWidget):
             self.setCursor(Qt.CursorShape.PointingHandCursor if hit else Qt.CursorShape.CrossCursor)
 
     def mouseReleaseEvent(self, e):
+        if self.crop_mode:
+            if self._crop_drag is not None:
+                before = self._crop_drag[2]
+                self._crop_drag = None
+                if self.crop_rect() != before:
+                    self.cropChanged.emit(self.crop_rect())
+            return
         if self._drag_from is None:
             return
         start, end = self._drag_from, self._drag_to
@@ -194,8 +345,16 @@ class Timeline(QWidget):
         self.fps = 30.0
         self.tracks: list[tuple[QColor, np.ndarray]] = []
         self.flags: list[int] = []
+        self.parts: list | None = None  # cut & crop: [start, end, removed] per part of the source
         self._cache_key = None
         self._cache: list[np.ndarray] = []
+
+    def set_parts(self, parts) -> None:
+        """Show the parts of a cut (None: back to face tracks)."""
+        self.parts = [tuple(p) for p in parts] if parts is not None else None
+        self.setMinimumHeight(40 if parts is not None else 22 + 10 * max(1, len(self.tracks)))
+        self.updateGeometry()
+        self.update()
 
     def sizeHint(self) -> QSize:
         return QSize(600, 22 + 10 * max(1, len(self.tracks)))
@@ -255,6 +414,9 @@ class Timeline(QWidget):
             x = self._x(int(t * self.fps))
             p.drawLine(int(x), 0, int(x), 4)
             t += step
+        if self.parts is not None:
+            self._paint_parts(p)
+            return
         top = 8
         for (color, _), cols in zip(self.tracks, self._columns(w)):
             dim = QColor(color)
@@ -274,6 +436,31 @@ class Timeline(QWidget):
         for f in self.flags:
             x = int(self._x(f))
             p.drawLine(x, 0, x, self.height())
+        x = int(self._x(self.pos))
+        p.setPen(QPen(QColor(255, 255, 255), 2))
+        p.drawLine(x, 0, x, self.height())
+
+    def _paint_parts(self, p: QPainter) -> None:
+        top, h = 8, self.height() - 12
+        current = None
+        for a, b, removed in self.parts:
+            x1, x2 = int(self._x(a)), max(int(self._x(b)), int(self._x(a)) + 1)
+            r = QRectF(x1, top, x2 - x1, h)
+            if removed:
+                p.fillRect(r, QColor(55, 25, 28))
+                p.fillRect(r, QBrush(QColor(150, 60, 66), Qt.BrushStyle.BDiagPattern))
+            else:
+                p.fillRect(r, QColor(61, 120, 220, 150))
+            if a <= self.pos < b:
+                current = r
+        p.setPen(QPen(QColor("#ffd400"), 2))  # split points
+        for a, _, _ in self.parts[1:]:
+            x = int(self._x(a))
+            p.drawLine(x, top - 4, x, top + h + 2)
+        if current is not None:  # the part Delete / Restore act on
+            p.setPen(QPen(QColor(255, 255, 255, 200), 1.5, Qt.PenStyle.DashLine))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(current.adjusted(1, 1, -1, -1))
         x = int(self._x(self.pos))
         p.setPen(QPen(QColor(255, 255, 255), 2))
         p.drawLine(x, 0, x, self.height())

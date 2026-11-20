@@ -11,7 +11,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-VERSION = 2  # 2: face cards labeled by the user (replaces automatic face groups)
+VERSION = 3  # 2: face cards labeled by the user (replaces automatic face groups); 3: cut & crop
 
 
 @dataclass
@@ -48,6 +48,19 @@ class Manual:
 
 
 @dataclass
+class Edit:
+    """Cut and crop, applied when frames are read (the source file is never
+    changed). Face detection and everything after it see only the edited
+    video, so frame numbers elsewhere in the project count edited frames."""
+    keep: list[list[int]] = field(default_factory=list)  # [start, end) source frames; empty = whole video
+    crop: list[int] | None = None  # [x, y, w, h] in display pixels; None = full frame
+
+    @property
+    def active(self) -> bool:
+        return bool(self.keep or self.crop)
+
+
+@dataclass
 class Settings:
     style: str = "pixelate"  # pixelate / blur / fill
     strength: float = 1.0
@@ -65,6 +78,7 @@ class Project:
     exclusions: list[Exclusion] = field(default_factory=list)
     manual: list[Manual] = field(default_factory=list)
     settings: Settings = field(default_factory=Settings)
+    edit: Edit = field(default_factory=Edit)
     output: str = ""
     path: str = ""  # where this project is saved (not stored in the file)
 
@@ -111,6 +125,7 @@ class Project:
             exclusions=[Exclusion(**x) for x in d.get("exclusions", [])],
             manual=[Manual(**x) for x in d.get("manual", [])],
             settings=Settings(**d.get("settings", {})),
+            edit=Edit(**d.get("edit", {})),
             output=absolute(d["output"]) if d.get("output") else "",
             path=str(p),
         )
