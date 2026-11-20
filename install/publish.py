@@ -30,7 +30,7 @@ import make_dist  # noqa: E402
 from update import RELEASES_REPO, parse_version  # noqa: E402
 
 ROOT = make_dist.ROOT
-SHIPPED = ["faceblur", "install"] + make_dist.SCRIPTS + ["README.md"]
+SHIPPED = ["faceblur", "install"] + make_dist.SCRIPTS + ["README.md", "LICENSE"]
 
 
 def run(*cmd: str, check: bool = True) -> subprocess.CompletedProcess:

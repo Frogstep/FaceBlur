@@ -242,3 +242,10 @@ py -3.12 -m venv .venv
 Models in `models/`: `det_10g.onnx` and `w600k_r50.onnx` (InsightFace buffalo_l,
 non-commercial license), `sam2.1_hiera_large.pt` and `sam2.1_hiera_tiny.pt` (Meta,
 Apache 2.0).
+
+## License
+
+FaceBlur's own code is under the [MIT License](LICENSE). The installer downloads
+third-party parts that keep their own licenses: the InsightFace face models
+(non-commercial research use only), SAM 2.1 (Apache 2.0), FFmpeg (GPL builds) and the
+Python packages.
