@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -32,6 +34,20 @@ SCRIPTS = ["install.bat", "FaceBlur.bat", "FaceBlurServer.bat", "update.bat",
            "install.sh", "FaceBlur.sh", "update.sh"]
 FILES = SCRIPTS + ["README.md", "install/update.py"] + LOCKS
 VERSION_FILE = ROOT / "faceblur" / "_version.py"  # only inside published zips
+# SHA-256 of what the locks were made from, so publish.py notices requirements.in
+# changes that were not locked (git checkouts reset file dates, so dates cannot tell)
+LOCK_STAMP = INSTALL / "locks.sha256"
+
+
+def lock_inputs_hash() -> str:
+    base = (INSTALL / "requirements.in").read_text(encoding="utf-8").replace("\r\n", "\n")
+    return hashlib.sha256(json.dumps([base, PLATFORMS, ONNXRUNTIME], sort_keys=True).encode()).hexdigest()
+
+
+def locks_current() -> bool:
+    """True when the locks were made from the current requirements.in (by lock())."""
+    stamp = LOCK_STAMP.read_text(encoding="utf-8").split() if LOCK_STAMP.exists() else []
+    return bool(stamp) and stamp[0] == lock_inputs_hash() and all((ROOT / f).exists() for f in LOCKS)
 
 
 def lock() -> None:
@@ -49,6 +65,8 @@ def lock() -> None:
                                 "--python-platform", uv_platform, "--no-header", "--no-annotate",
                                 "-q", "-o", str(out)], check=True)
                 print(f"locked {out.relative_to(ROOT)}")
+    LOCK_STAMP.write_text(f"{lock_inputs_hash()}  written by make_dist.py --lock; commit it with the locks\n",
+                          encoding="utf-8")
 
 
 def _entry(z: zipfile.ZipFile, path: Path, data: bytes | None = None) -> None:

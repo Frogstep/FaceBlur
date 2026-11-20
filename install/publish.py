@@ -10,7 +10,8 @@ public repo named in install/update.py (RELEASES_REPO), which holds only the rel
 this source repo stays private. Needs the GitHub CLI (gh), signed in.
 
 The shipped files must be committed first, so every release matches a commit; the commit
-gets a local tag v<version>.
+gets a local tag v<version>. The package locks must be made from the current
+install/requirements.in (make_dist.py --lock), or other PCs would not get new packages.
 """
 
 from __future__ import annotations
@@ -84,6 +85,13 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="build only, upload nothing")
     a = ap.parse_args()
 
+    if not make_dist.locks_current():
+        msg = ("install/requirements.in changed since the package locks were made, so other PCs would "
+               "not get the new packages.\nRun make_dist.bat --lock, commit install/requirements-*.txt and "
+               "install/locks.sha256, then publish again.")
+        if not a.dry_run:
+            sys.exit(msg)
+        print(f"Warning: {msg}\n")
     exe = None if a.dry_run else gh()
     if not a.dry_run:
         check_committed()

@@ -206,6 +206,9 @@ only the release zips (this source repo stays private).
 
 `publish.bat --dry-run` only builds the files. Uncommitted changes to the shipped files
 (`faceblur/`, `install/`, the scripts, README) stop it, so each release matches a commit.
+It also stops when `install/requirements.in` changed after the locks were made (other PCs
+would not get the new packages): run `make_dist.bat --lock`, which regenerates
+`install/requirements-*.txt` and `install/locks.sha256`, and commit them.
 
 **Update (the other PC):** close FaceBlur and its server, then run **`update.bat`**
 (`./update.sh` on Linux). It reads `version.json` of the newest release; if it is newer

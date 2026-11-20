@@ -135,3 +135,25 @@ def test_refresh_runs_installer_only_when_needed(tmp_path, monkeypatch):
     (new / lock).write_text("torch==9")
     update.refresh_environment(old, "cpu")
     assert calls[-1][-1] == "cpu" and any("install" in c for c in calls[-1])
+
+
+def test_locks_current_follows_requirements(tmp_path, monkeypatch):
+    install = tmp_path / "install"
+    install.mkdir()
+    for f in make_dist.LOCKS:
+        (tmp_path / f).write_text("pinned==1\n")
+    (install / "requirements.in").write_text("numpy\n")
+    monkeypatch.setattr(make_dist, "ROOT", tmp_path)
+    monkeypatch.setattr(make_dist, "INSTALL", install)
+    monkeypatch.setattr(make_dist, "LOCK_STAMP", install / "locks.sha256")
+    assert not make_dist.locks_current()  # never locked
+    (install / "locks.sha256").write_text(make_dist.lock_inputs_hash() + "  comment\n")
+    assert make_dist.locks_current()
+    (install / "requirements.in").write_bytes(b"numpy\r\n")  # only line endings: still current
+    assert make_dist.locks_current()
+    (install / "requirements.in").write_text("numpy\nscipy\n")
+    assert not make_dist.locks_current()
+
+
+def test_repo_locks_are_current():
+    assert make_dist.locks_current(), "run make_dist.py --lock"
