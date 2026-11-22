@@ -8,7 +8,7 @@ without re-detecting faces (detections are cached in work/<video>/).
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 VERSION = 4  # 2: face cards labeled by the user (replaces automatic face groups); 3: cut & crop;
@@ -73,8 +73,15 @@ class Settings:
     safety_check: bool = False  # web server: run the safety check after rendering
 
 
+def _known(cls, d: dict) -> dict:
+    """Keep only the fields cls knows, so files saved by a newer version (or
+    another branch) still open; their extra fields are dropped."""
+    names = {f.name for f in fields(cls)}
+    return {k: v for k, v in d.items() if k in names}
+
+
 def _settings(d: dict, version: int) -> Settings:
-    d = dict(d)
+    d = _known(Settings, d)
     if version < 4 and d.get("cq") == 19:
         d.pop("cq")  # the old fixed default, now the "high" level: lets the level follow the format
     return Settings(**d)
@@ -131,11 +138,11 @@ class Project:
         return cls(
             video=absolute(d["video"]),
             people=[Person(name=x["name"]) for x in d.get("people", [])],
-            labels=[Label(**x) for x in d.get("labels", [])],
-            exclusions=[Exclusion(**x) for x in d.get("exclusions", [])],
-            manual=[Manual(**x) for x in d.get("manual", [])],
+            labels=[Label(**_known(Label, x)) for x in d.get("labels", [])],
+            exclusions=[Exclusion(**_known(Exclusion, x)) for x in d.get("exclusions", [])],
+            manual=[Manual(**_known(Manual, x)) for x in d.get("manual", [])],
             settings=_settings(d.get("settings", {}), d.get("version", 1)),
-            edit=Edit(**d.get("edit", {})),
+            edit=Edit(**_known(Edit, d.get("edit", {}))),
             output=absolute(d["output"]) if d.get("output") else "",
             path=str(p),
         )
