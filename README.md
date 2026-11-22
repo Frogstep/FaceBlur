@@ -75,7 +75,9 @@ A project saved from the app (including its corrections) renders with:
 
 Output: `input_masked.mp4`. Options: `--style pixelate|blur|fill`, `--strength 1.5`
 (coarser), `--pad 0.4` (bigger margin), `--debug` (overlay video in `work/input/debug.mp4`),
-`--sam` (exact outlines with SAM 2; new projects use ellipses), `--no-sam`, `--no-check`,
+`--sam` (exact outlines with SAM 2; new projects use ellipses), `--no-sam`,
+`--sam-model tiny|small|base_plus|large` (SAM 2.1 size, implies `--sam`; default auto = large on
+the GPU, tiny on the CPU; a size not downloaded yet is downloaded first), `--no-check`,
 `--codec h265|h264` (default h265), `--quality best|high|medium|small` (default high).
 `--cq 0-51` sets the encoder's number directly instead of a level (NVENC CQ / x264 CRF,
 lower = better and bigger); the levels are H.265 16/19/23/28 and H.264 15/18/22/26. The
@@ -155,7 +157,10 @@ with **Device** in the app's Render box, `--device auto|gpu|cpu` on the command 
 | Encode | `hevc_nvenc` | `libx265` |
 
 On the CPU, SAM 2 is slow even with the tiny model; turning it off (ellipse masks) is much
-faster. Detections cached on one machine are valid on another.
+faster. The app's *SAM 2 model* setting picks the size per project (tiny, small, base+ or
+large; smaller is faster, larger follows the outline more exactly); a size that is not in
+`models/` yet is downloaded on the first render with it. On an RTX 5060 Ti, tiny, small and
+base+ render about 1.5–1.7× faster than large, and small is a good everyday choice. Detections cached on one machine are valid on another.
 
 ## Install on another PC
 
@@ -250,8 +255,8 @@ py -3.12 -m venv .venv
 ```
 
 Models in `models/`: `det_10g.onnx` and `w600k_r50.onnx` (InsightFace buffalo_l,
-non-commercial license), `sam2.1_hiera_large.pt` and `sam2.1_hiera_tiny.pt` (Meta,
-Apache 2.0).
+non-commercial license), `sam2.1_hiera_large.pt`, `sam2.1_hiera_tiny.pt` and, when chosen,
+`sam2.1_hiera_small.pt` / `sam2.1_hiera_base_plus.pt` (Meta, Apache 2.0).
 
 ## License
 

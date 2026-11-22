@@ -121,6 +121,7 @@ class Settings(BaseModel):
     strength: float = Field(1.0, ge=0.2, le=5.0)
     pad: float = Field(0.3, ge=0.0, le=1.0)
     use_sam: bool = False  # SAM 2 face outlines (slow); off: ellipses
+    sam_model: Literal["auto", "tiny", "small", "base_plus", "large"] = "auto"  # SAM 2.1 size (tiny = fastest)
     codec: Literal["h265", "h264"] = "h265"  # h265: smaller file; h264: plays in every browser
     quality: Literal["best", "high", "medium", "small"] = "high"
     cq: int | None = Field(None, ge=0, le=51)  # exact NVENC CQ / x264 CRF instead of the level (lower = better)
@@ -132,6 +133,7 @@ class SettingsPatch(BaseModel):
     strength: float | None = Field(None, ge=0.2, le=5.0)
     pad: float | None = Field(None, ge=0.0, le=1.0)
     use_sam: bool | None = None
+    sam_model: Literal["auto", "tiny", "small", "base_plus", "large"] | None = None
     codec: Literal["h265", "h264"] | None = None
     quality: Literal["best", "high", "medium", "small"] | None = None  # clears cq unless cq is also given
     cq: int | None = Field(None, ge=0, le=51)

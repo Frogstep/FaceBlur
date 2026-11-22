@@ -2,7 +2,7 @@
 
   python -m faceblur.setup_models --gpu     SAM 2.1 large (+ face models, FFmpeg)
   python -m faceblur.setup_models --cpu     SAM 2.1 tiny  (+ face models, FFmpeg)
-  python -m faceblur.setup_models --all     both SAM 2.1 sizes
+  python -m faceblur.setup_models --all     every SAM 2.1 size
   python -m faceblur.setup_models --check   report what is installed and what runs on the GPU
 
 Uses only the standard library, so it runs before anything else works. Files that
@@ -61,6 +61,10 @@ SAM_MODELS = {
                   "https://huggingface.co/facebook/sam2.1-hiera-large/resolve/main/sam2.1_hiera_large.pt"),
     "tiny": Item("sam2.1_hiera_tiny.pt", "7402e0d864fa82708a20fbd15bc84245c2f26dff0eb43a4b5b93452deb34be69",
                  "https://huggingface.co/facebook/sam2.1-hiera-tiny/resolve/main/sam2.1_hiera_tiny.pt"),
+    "small": Item("sam2.1_hiera_small.pt", "6d1aa6f30de5c92224f8172114de081d104bbd23dd9dc5c58996f0cad5dc4d38",
+                  "https://huggingface.co/facebook/sam2.1-hiera-small/resolve/main/sam2.1_hiera_small.pt"),
+    "base_plus": Item("sam2.1_hiera_base_plus.pt", "a2345aede8715ab1d5d31b4a509fb160c5a4af1970f199d9054ccfb746c004c5",
+                      "https://huggingface.co/facebook/sam2.1-hiera-base-plus/resolve/main/sam2.1_hiera_base_plus.pt"),
 }
 
 # FFmpeg 9.0 GPL builds with NVENC/NVDEC and libx265.
@@ -133,8 +137,9 @@ def published_sha(sha_url: str, filename: str) -> str:
     raise RuntimeError(f"{filename} is not listed in {sha_url}")
 
 
-def download(url: str, dest: Path, expected_sha: str, tries: int = 4) -> None:
-    """Download url to dest (resuming a partial .part file) and check its SHA-256."""
+def download(url: str, dest: Path, expected_sha: str, tries: int = 4, progress=None) -> None:
+    """Download url to dest (resuming a partial .part file) and check its SHA-256.
+    progress(done_bytes, total_bytes): optional hook (the app's progress bar)."""
     if dest.exists() and sha256(dest) == expected_sha:
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -153,6 +158,8 @@ def download(url: str, dest: Path, expected_sha: str, tries: int = 4) -> None:
                         done += len(chunk)
                         if time.monotonic() - last > 0.5:
                             last = time.monotonic()
+                            if progress:
+                                progress(done, total)
                             pct = f"{100 * done / total:5.1f}%" if total else ""
                             print(f"\r  {dest.name}: {_mb(done)} / {_mb(total)} {pct}   ", end="", flush=True)
             print(f"\r  {dest.name}: {_mb(done)} downloaded{' ' * 20}")
@@ -286,6 +293,13 @@ def system_deps_command() -> str:
 
 # ---------------------------------------------------------------- check
 
+def fetch_sam(size: str, progress=None) -> None:
+    """Download one SAM 2.1 size if it is missing (when chosen in the app)."""
+    it = SAM_MODELS[size]
+    if not (it.folder / it.name).exists():
+        download(it.url, it.folder / it.name, it.sha256, progress=progress)
+
+
 def check() -> int:
     """Print what is installed and where things will run. Returns 0 when usable."""
     problems = 0
@@ -360,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
     which = ap.add_mutually_exclusive_group()
     which.add_argument("--gpu", action="store_true", help="SAM 2.1 large (default)")
     which.add_argument("--cpu", action="store_true", help="SAM 2.1 tiny only (CPU-only PC)")
-    which.add_argument("--all", action="store_true", help="both SAM 2.1 sizes")
+    which.add_argument("--all", action="store_true", help="every SAM 2.1 size (tiny, small, base+, large)")
     ap.add_argument("--no-ffmpeg", action="store_true", help="use FFmpeg from PATH instead of downloading it")
     ap.add_argument("--check", action="store_true", help="only report the installation")
     ap.add_argument("--system-deps", action="store_true",
@@ -374,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
             print(cmd)
         return 0
 
-    sizes = ["tiny"] if a.cpu else ["large", "tiny"] if a.all else ["large"]
+    sizes = ["tiny"] if a.cpu else list(SAM_MODELS) if a.all else ["large"]
     items = FACE_MODELS + [SAM_MODELS[s] for s in sizes] + ([] if a.no_ffmpeg else FFMPEG)
     print("Model weights and FFmpeg:")
     try:
