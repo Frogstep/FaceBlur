@@ -177,7 +177,9 @@ def test_each_edit_has_its_own_scan_cache(tmp_path):
     info = _fake_info()
     paths = {detections_cache(tmp_path, i) for i in
              (info, info.with_edit([[0, 20]]), info.with_edit([[0, 21]]), info.with_edit(None, CROP))}
-    assert len(paths) == 4 and detections_cache(tmp_path, info).name == "detections.npz"
+    paths |= {detections_cache(tmp_path, info, any_angle=True),
+              detections_cache(tmp_path, info.with_edit([[0, 20]]), any_angle=True)}
+    assert len(paths) == 6 and detections_cache(tmp_path, info).name == "detections_cfr.npz"
     for p in [*paths, tmp_path / "thumbs_96.npz", tmp_path / "thumbs_96_abc.npz", tmp_path / "project.json"]:
         p.write_bytes(b"x")
     clear_scan_cache(tmp_path)
@@ -225,3 +227,88 @@ def test_render_writes_in_the_temp_folder(clip, tmp_path, monkeypatch):
     assert result.output == Path(project.output) and result.output.stat().st_size > 0
     assert list(temp.iterdir()) == []  # moved into place; the stale leftover is gone too
     assert not list(result.output.parent.glob("*.partial*"))
+
+
+# ------------------------------------------------------------------ turning
+
+@pytest.mark.parametrize("turn,code", [(90, 0), (180, 1), (270, 2)])
+def test_reader_turns_then_crops(clip, source_frames, turn, code):
+    import cv2
+
+    rot = {0: cv2.ROTATE_90_CLOCKWISE, 1: cv2.ROTATE_180, 2: cv2.ROTATE_90_COUNTERCLOCKWISE}[code]
+    t = probe(clip).turned(turn)
+    assert (t.width, t.height) == ((120, 160) if turn % 180 else (160, 120))
+    info = t.with_edit(KEEP, [10, 20, 60, 90])
+    frames = list(FrameReader(info, hwaccel=False))
+    assert frames[0].shape == (90, 60, 3)
+    for k in (0, 6, 14):
+        want = cv2.rotate(source_frames[info.to_source(k)], rot)[20:110, 10:70]
+        assert np.abs(frames[k].astype(np.int16) - want).mean() < 3, f"edited frame {k}"
+    assert np.array_equal(FrameGrabber(info).get(6), frames[6])
+
+
+def test_turn_is_part_of_the_edit():
+    from faceblur.video_io import turn_crop
+
+    info = _fake_info(1920, 1080)
+    assert info.turned(0) is info and not info.edited
+    t = info.turned(90)
+    assert t.edited and t.edit_key() != info.with_edit([[0, 20]]).edit_key()
+    assert t.with_edit() is t and t.with_edit([[0, 20]]).turn == 90
+    with pytest.raises(ValueError):
+        info.turned(45)
+    with pytest.raises(ValueError):
+        t.with_edit([[0, 20]]).turned(90)
+    # a crop turns with the picture: four quarter turns bring it back
+    crop, w, h = [100, 50, 400, 300], 1920, 1080
+    for _ in range(4):
+        crop = turn_crop(crop, 90, w, h)
+        w, h = h, w
+        assert crop[0] + crop[2] <= w and crop[1] + crop[3] <= h
+    assert crop == [100, 50, 400, 300]
+    assert turn_crop([100, 50, 400, 300], 180, 1920, 1080) == [1420, 730, 400, 300]
+    assert turn_crop([100, 50, 400, 300], 270, 1920, 1080) == [50, 1420, 300, 400]
+
+
+def test_project_keeps_the_turn(tmp_path):
+    p = Project.new(tmp_path / "v.mp4")
+    p.edit = Edit(turn=270)
+    assert p.edit.active
+    p.save()
+    assert Project.load(p.path).edit.turn == 270
+
+
+# ------------------------------------------------------------------ gaps
+
+@pytest.fixture(scope="module")
+def gappy(tmp_path_factory) -> Path:
+    """An AVI that says 10 fps but has empty slots (3, 8, 13, ...: as some
+    cameras write when they cannot keep up), with sound."""
+    out = tmp_path_factory.mktemp("gaps") / "gappy.avi"
+    subprocess.run([_ffbin("ffmpeg"), "-v", "error", "-f", "lavfi",
+                    "-i", f"testsrc=size=160x120:rate={FPS}:duration={SECONDS}",
+                    "-f", "lavfi", "-i", f"sine=frequency=440:duration={SECONDS}:sample_rate=16000",
+                    "-vf", "select='mod(n+2,5)'", "-fps_mode", "passthrough",
+                    "-c:v", "mjpeg", "-q:v", "3", "-c:a", "pcm_s16le", "-shortest", str(out)], check=True)
+    return out
+
+
+def test_frames_follow_the_clock_across_gaps(gappy, source_frames):
+    """Frame N is the picture at N / fps (a missing slot shows the next real
+    frame), however reading starts, so it matches the sound and the frames
+    seeking finds."""
+    info = probe(gappy)
+    frames = list(FrameReader(info, hwaccel=False))
+    assert len(frames) == SECONDS * FPS
+    src = [f.astype(np.int16) for f in source_frames]
+    for k in (0, 2, 3, 4, 8, 13, 29):
+        closest = int(np.argmin([np.abs(frames[k].astype(np.int16) - f).mean() for f in src]))
+        assert closest == (k + 1 if k % 5 == 3 else k), f"frame {k}"  # a gap shows the next frame
+    grab = FrameGrabber(info)
+    for k in (3, 4, 8, 13, 23):  # seeking right onto a missing slot too
+        assert np.array_equal(grab.get(k), frames[k]), f"seek to {k}"
+    cut = info.with_edit([[3, 12], [18, 26]])  # both parts start on a missing slot
+    part = list(FrameReader(cut, hwaccel=False))
+    assert len(part) == cut.num_frames
+    for k in (3, 4, 8, 11, 18, 23, 25):
+        assert np.array_equal(part[cut.from_source(k)], frames[k]), f"cut frame at source {k}"

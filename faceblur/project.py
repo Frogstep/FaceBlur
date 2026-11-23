@@ -50,15 +50,20 @@ class Manual:
 
 @dataclass
 class Edit:
-    """Cut and crop, applied when frames are read (the source file is never
+    """Turn, cut and crop, applied when frames are read (the source file is never
     changed). Face detection and everything after it see only the edited
     video, so frame numbers elsewhere in the project count edited frames."""
     keep: list[list[int]] = field(default_factory=list)  # [start, end) source frames; empty = whole video
-    crop: list[int] | None = None  # [x, y, w, h] in display pixels; None = full frame
+    crop: list[int] | None = None  # [x, y, w, h] in display pixels (after turning); None = full frame
+    turn: int = 0  # degrees clockwise (0/90/180/270): for a camera that filmed on its side
+    # also look for sideways and upside-down faces (camera on its side, people
+    # lying down); face detection takes about 4x longer. Not part of `active`:
+    # it changes how faces are found, not which frames and pixels are used.
+    any_angle: bool = False
 
     @property
     def active(self) -> bool:
-        return bool(self.keep or self.crop)
+        return bool(self.keep or self.crop or self.turn)
 
 
 @dataclass

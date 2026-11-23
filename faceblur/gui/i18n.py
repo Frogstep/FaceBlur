@@ -314,6 +314,22 @@ _RU = {
     "Shape of the crop": "Пропорции кадра",
     "Full frame": "Весь кадр",
     "Remove the crop": "Убрать кадрирование",
+    "Turn the video left (90° counterclockwise), e.g. when the camera filmed on its side":
+        "Повернуть видео влево (на 90° против часовой стрелки), например если камера снимала на боку",
+    "Turn the video right (90° clockwise), e.g. when the camera filmed on its side":
+        "Повернуть видео вправо (на 90° по часовой стрелке), например если камера снимала на боку",
+    "Turn left": "Повернуть влево",
+    "Turn right": "Повернуть вправо",
+    ", turned right": ", повёрнуто вправо",
+    ", upside down": ", перевёрнуто",
+    ", turned left": ", повёрнуто влево",
+    "Faces at any angle (slower)": "Лица под любым углом (медленнее)",
+    "Click “Change cut & crop…” to change this; faces are then detected again.":
+        "Чтобы изменить, нажмите «Изменить обрезку и кадр…»; лица будут найдены заново.",
+    "Also find sideways and upside-down faces (camera on its side, people lying down). "
+    "Face detection takes about 4 times longer.":
+        "Находить и лица, повёрнутые набок или вверх ногами (камера на боку, люди лёжа). "
+        "Поиск лиц идёт примерно в 4 раза дольше.",
     "Undo (Ctrl+Z)": "Отменить (Ctrl+Z)",
     "Redo (Ctrl+Y)": "Повторить (Ctrl+Y)",
     "Crop: drag the corners or edges of the frame (drag outside it to draw a new crop). "

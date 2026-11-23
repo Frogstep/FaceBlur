@@ -50,7 +50,7 @@ class Cancelled(Exception):
 
 
 def scan(info: VideoInfo, analyzer: FaceAnalyzer, cache: Path | None = None,
-         desc: str = "detecting faces", progress=None, cancel=None) -> Detections:
+         desc: str = "detecting faces", progress=None, cancel=None, any_angle: bool = False) -> Detections:
     """progress(done, total) and cancel() -> bool are optional hooks for the GUI;
     without progress a console progress bar is shown."""
     if cache is not None and cache.exists():
@@ -58,7 +58,7 @@ def scan(info: VideoInfo, analyzer: FaceAnalyzer, cache: Path | None = None,
     tracker = ByteTrack(info.fps_float)
     fr, bx, sc, kp, em, tr = [], [], [], [], [], []
     n = 0
-    stream = analyzer.analyze_stream(FrameReader(info))
+    stream = analyzer.analyze_stream(FrameReader(info), any_angle=any_angle)
     results = stream if progress is not None else tqdm(stream, total=info.num_frames, desc=desc, unit="f")
     for i, (_frame, faces) in enumerate(results):
         if cancel and cancel():

@@ -4,7 +4,9 @@
   python -m faceblur pick   VIDEO               scan faces, write the numbered face-card sheet
   python -m faceblur render VIDEO --blur 1,3    blur the faces on cards 1 and 3 (the rest stay visible)
   python -m faceblur render --project P.faceblur.json   render a project saved from the app
-  pick and render also take --keep 0:12-1:30,2:05- and --crop X,Y,W,H (cut & crop first)
+  pick and render also take --keep 0:12-1:30,2:05- and --crop X,Y,W,H (cut & crop first),
+  and --any-angle for sideways and upside-down faces (slower scan), or --turn 90|180|270
+  to turn a video filmed on its side upright (faster than --any-angle)
   python -m faceblur check  MASKED --video SRC  safety pass on an already rendered file
   python -m faceblur serve  [--port 8765]       HTTP API for other devices (e.g. a phone app)
 """
@@ -55,7 +57,7 @@ def _open(video: Path, edit=None):
     info = open_video(video, edit)
     if info.edited:
         print(f"edited video: {info.num_frames} frames ({info.duration:.1f}s), {info.width}x{info.height}")
-    if detections_cache(workdir(video), info).exists():
+    if detections_cache(workdir(video), info, bool(edit and edit.any_angle)).exists():
         print(f"using cached detections in work/{video.stem}/")
     bar = _Bar()
     analysis = Analysis.open(video, progress=bar, edit=edit)
@@ -117,12 +119,13 @@ def _edit_from_args(args, video: Path):
     from .video_io import probe
 
     if not (args.keep or args.crop):
-        return Edit(), None
+        return Edit(any_angle=args.any_angle, turn=args.turn), None
     info = probe(video)
     try:
         edit = Edit(keep=parse_keep(args.keep, info.fps_float, info.num_frames) if args.keep else [],
-                    crop=parse_crop(args.crop) if args.crop else None)
-        info.with_edit(edit.keep, edit.crop)  # checks it leaves something
+                    crop=parse_crop(args.crop) if args.crop else None, any_angle=args.any_angle,
+                    turn=args.turn)
+        info.turned(edit.turn).with_edit(edit.keep, edit.crop)  # checks it leaves something
     except ValueError as e:
         return None, str(e)
     return edit, None
@@ -134,6 +137,10 @@ def _edit_flags(args) -> str:
         out += f" --keep {args.keep}"
     if args.crop:
         out += f" --crop {args.crop}"
+    if args.turn:
+        out += f" --turn {args.turn}"
+    if args.any_angle:
+        out += " --any-angle"
     return out
 
 
@@ -182,8 +189,8 @@ def cmd_pick(args) -> int:
         print(f"  #{c.number}: {fr.min() / fps:.1f}s - {fr.max() / fps:.1f}s, {len(c.det_idx)} frames")
     print(f"\nNext, choose the cards to blur, e.g.:")
     print(f"  python -m faceblur render {args.video}{_edit_flags(args)} --blur 1,2,5")
-    if edit.active:
-        print("(give render the same --keep / --crop: card numbers belong to this cut)")
+    if edit.active or edit.any_angle:
+        print("(give render the same --keep / --crop / --turn / --any-angle: card numbers belong to this scan)")
     return 0
 
 
@@ -221,8 +228,8 @@ def cmd_render(args) -> int:
         if args.blur:
             print("use either --project or --blur, not both")
             return 1
-        if args.keep or args.crop:
-            print("--keep / --crop apply to a new project; a saved project keeps its own cut & crop")
+        if args.keep or args.crop or args.turn or args.any_angle:
+            print("--keep / --crop / --turn / --any-angle apply to a new project; a saved project keeps its own")
             return 1
         project = Project.load(args.project)
         print(f"project: {args.project} ({len(project.exclusions)} exclusions, {len(project.manual)} drawn boxes)")
@@ -278,16 +285,16 @@ def cmd_render(args) -> int:
         return 0
     from .pipeline import load_target_refs
 
-    return _check(result.output, load_target_refs(analysis.wd), analysis.wd)
+    return _check(result.output, load_target_refs(analysis.wd), analysis.wd, analysis.any_angle)
 
 
 # --------------------------------------------------------------------- check
 
-def _check(masked: Path, refs_list, wd: Path) -> int:
+def _check(masked: Path, refs_list, wd: Path, any_angle: bool = False) -> int:
     from .pipeline import safety_check
 
     bar = _Bar()
-    report = safety_check(masked, refs_list, wd, progress=bar)
+    report = safety_check(masked, refs_list, wd, progress=bar, any_angle=any_angle)
     bar.close()
     flagged = report["flagged"]
     if flagged:
@@ -308,7 +315,7 @@ def cmd_check(args) -> int:
     if not refs:
         print("no target recorded for this video; run render first")
         return 1
-    return _check(Path(args.masked).resolve(), refs, wd)
+    return _check(Path(args.masked).resolve(), refs, wd, args.any_angle)
 
 
 def cmd_serve(args) -> int:
@@ -351,6 +358,12 @@ def main(argv=None) -> int:
                            "an open end means the end of the video). Faces are only looked for there.")
     edit.add_argument("--crop", metavar="X,Y,W,H",
                       help="crop to this rectangle in pixels (rounded to even numbers), e.g. 0,420,1080,1080")
+    edit.add_argument("--turn", type=int, choices=[0, 90, 180, 270], default=0,
+                      help="turn the video clockwise by this many degrees first (a camera that filmed on "
+                           "its side); a --crop is then in the turned picture")
+    edit.add_argument("--any-angle", action="store_true",
+                      help="also find sideways and upside-down faces (camera on its side, people lying "
+                           "down); face detection takes about 4x longer")
 
     p = sub.add_parser("pick", parents=[common, edit], help="find faces and write the numbered face-card sheet")
     p.add_argument("video")
@@ -383,6 +396,7 @@ def main(argv=None) -> int:
     c = sub.add_parser("check", parents=[common], help="safety pass on a rendered file")
     c.add_argument("masked")
     c.add_argument("--video", required=True, help="the original video (to find the target)")
+    c.add_argument("--any-angle", action="store_true", help="also look for sideways and upside-down faces")
     c.set_defaults(fn=cmd_check)
 
     sv = sub.add_parser("serve", parents=[common], help="HTTP API for other devices (e.g. a phone app)")
