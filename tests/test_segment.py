@@ -3,17 +3,20 @@ blurred face shares one state per chunk, is tracked from its first prompt
 (forwards and backwards) and stops once SAM 2 has lost it beyond its boxes.
 
   .venv/Scripts/python -m pytest tests/test_segment.py -q
+
+Needs PyTorch (segment.py imports it), so it is skipped in CI, which runs without it.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
-import torch
 
-from faceblur import segment
-from faceblur.identity import TargetPlan
-from faceblur.segment import Segmenter
+torch = pytest.importorskip("torch")
+
+from faceblur import segment  # noqa: E402
+from faceblur.identity import TargetPlan  # noqa: E402
+from faceblur.segment import Segmenter  # noqa: E402
 
 H = W = 32
 N = 60
