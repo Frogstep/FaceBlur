@@ -14,8 +14,9 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QSettings, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QColor, QKeySequence, QPalette, QShortcut
+from PySide6.QtCore import QPointF, QRectF, QSettings, QSize, Qt, QTimer
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap,
+                           QPolygonF, QShortcut)
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
                                QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
@@ -27,7 +28,7 @@ from ..edit import CutList
 from ..identity import Cancelled  # noqa: F401  (re-exported for workers)
 from ..pipeline import Analysis, card_thumbnails, detections_cache, load_target_refs, render, safety_check, workdir
 from ..project import Edit, Exclusion, Manual, Project
-from ..video_io import FrameGrabber, fit_crop, probe
+from ..video_io import FrameGrabber, fit_crop, probe, turn_crop
 from . import i18n
 from .i18n import HELP_EN, LANGUAGES, tr, trn
 from .review_tab import ReviewPanel
@@ -61,6 +62,26 @@ def fmt_time(seconds: float) -> str:
     return f"{int(m)}:{s:04.1f}"
 
 
+def _turn_icon(clockwise: bool, color: QColor) -> QIcon:
+    """A three-quarter circle with an arrowhead: turn the picture left or right."""
+    px = QPixmap(40, 40)  # drawn at 2x, shown at 20x20
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QPen(color, 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    if not clockwise:  # the mirror image
+        p.translate(40, 0)
+        p.scale(-1, 1)
+    # arc from 3 o'clock going clockwise round to 12 o'clock (Qt angles run counterclockwise)
+    p.drawArc(QRectF(7, 8, 26, 26), 0, -270 * 16)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(color)
+    # arrowhead at 12 o'clock, pointing right = going clockwise
+    p.drawPolygon(QPolygonF([QPointF(30, 8), QPointF(19, 1), QPointF(19, 15)]))
+    p.end()
+    return QIcon(px)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -82,7 +103,8 @@ class MainWindow(QMainWindow):
         self.task: Task | None = None
         self.player: Player | None = None
         # cut & crop
-        self.src_info = None  # the source video, uncut and uncropped (self.info is the edited one)
+        self.src_info = None  # the source video, turned but uncut and uncropped (self.info is the edited one)
+        self._raw_info = None  # the source video as it is in the file
         self.src_grabber: FrameGrabber | None = None
         self.editing = False  # edit mode: the view and timeline show the source
         self.cuts: CutList | None = None
@@ -192,6 +214,14 @@ class MainWindow(QMainWindow):
         self.cut_toggle_btn = ebtn("Remove part", "Remove the part under the playhead, or bring it back (Delete)",
                                    self._cut_toggle)
         eb.addSpacing(18)
+        for text, tip, by in (("Turn left", "Turn the video left (90° counterclockwise), e.g. when the camera "
+                                            "filmed on its side", 270),
+                              ("Turn right", "Turn the video right (90° clockwise), e.g. when the camera "
+                                             "filmed on its side", 90)):
+            b = ebtn(text, tip, lambda _=False, by=by: self._turn(by))
+            b.setIcon(_turn_icon(clockwise=by == 90, color=b.palette().buttonText().color()))
+            b.setIconSize(QSize(20, 20))
+        eb.addSpacing(18)
         eb.addWidget(QLabel(tr("Crop")))
         self.aspect_combo = QComboBox()
         for label, ar in ASPECTS:
@@ -243,6 +273,12 @@ class MainWindow(QMainWindow):
         self.edit_summary = QLabel("–")
         self.edit_summary.setWordWrap(True)
         ev.addWidget(self.edit_summary)
+        # how faces are looked for: set next to the Detect faces button (in cut & crop mode)
+        self.any_angle_cb = QCheckBox(tr("Faces at any angle (slower)"))
+        self.any_angle_cb.setToolTip(tr("Also find sideways and upside-down faces (camera on its side, "
+                                        "people lying down). Face detection takes about 4 times longer."))
+        self.any_angle_cb.toggled.connect(self._any_angle_toggled)
+        ev.addWidget(self.any_angle_cb)
         self.edit_btn = QPushButton()
         self.edit_btn.setMinimumHeight(36)
         self.edit_btn.clicked.connect(self._edit_button)
@@ -492,6 +528,11 @@ class MainWindow(QMainWindow):
         self.undo_btn.setEnabled(bool(self._undo))
         self.redo_btn.setEnabled(bool(self._redo))
         self.edit_btn.setEnabled(self.project is not None and not busy)
+        self.any_angle_cb.setEnabled(editing and not busy)
+        self.any_angle_cb.setToolTip(tr("Also find sideways and upside-down faces (camera on its side, "
+                                        "people lying down). Face detection takes about 4 times longer.")
+                                     if editing else
+                                     tr("Click “Change cut & crop…” to change this; faces are then detected again."))
         if editing:
             unchanged = self.analysis is not None and self._scanned_edit == self.project.edit
             self.edit_btn.setText(tr("Back to the faces (nothing changed)") if unchanged
@@ -540,7 +581,8 @@ class MainWindow(QMainWindow):
                 project = Project.load(Project.default_path(p))
             else:
                 project = Project.new(p)
-            src = probe(project.video)
+            raw = probe(project.video)
+            src = raw.turned(project.edit.turn)
             info = src.with_edit(project.edit.keep, project.edit.crop) if project.edit.active else src
         except Exception as e:
             QMessageBox.critical(self, tr("Cannot open"), f"{path}\n\n{e}")
@@ -552,6 +594,7 @@ class MainWindow(QMainWindow):
             self.task = None
         self.project, self.info, self.analysis = project, info, None
         self.grabber = FrameGrabber(info)
+        self._raw_info = raw
         self.src_info, self.src_grabber = src, (FrameGrabber(src) if src is not info else self.grabber)
         self.cuts = CutList(src.num_frames, project.edit.keep)
         self._undo.clear()
@@ -578,7 +621,7 @@ class MainWindow(QMainWindow):
         self._update_edit_summary()
         if info.vfr:
             self.status.setText(tr("Note: variable frame rate video; the output will use a constant frame rate."))
-        if detections_cache(workdir(project.video), info).exists():  # scanned before: straight to the faces
+        if detections_cache(workdir(project.video), info, project.edit.any_angle).exists():  # scanned before
             self._run_task(self._analysis_job(project.video), self._on_analysis_done, tr("Detecting faces"))
         else:  # new: cut & crop first, so faces are only looked for where needed
             self._enter_edit()
@@ -1122,12 +1165,13 @@ class MainWindow(QMainWindow):
 
     def _edit_state(self) -> tuple:
         crop = self.project.edit.crop
-        return self.cuts.state(), tuple(crop) if crop else None
+        return self.cuts.state(), tuple(crop) if crop else None, self.project.edit.turn
 
     def _set_edit_state(self, state: tuple) -> None:
-        parts, crop = state
+        parts, crop, turn = state
         self.cuts.restore(parts)
         self.project.edit.crop = list(crop) if crop else None
+        self.project.edit.turn = turn
 
     def _edit_change(self, fn) -> None:
         """Run fn(), which changes the cut or the crop and returns True when it
@@ -1166,6 +1210,10 @@ class MainWindow(QMainWindow):
 
     def _edit_applied(self) -> None:
         self.project.edit.keep = self.cuts.keep()
+        if self.src_info.turn != self.project.edit.turn:  # show (and crop) the turned picture
+            self.src_info = self._raw_info.turned(self.project.edit.turn)
+            self.src_grabber = FrameGrabber(self.src_info)
+            self._play_info = None
         self.view.set_crop(self.project.edit.crop)
         self.timeline.set_parts(self.cuts.parts)
         self._mark_dirty()
@@ -1205,6 +1253,16 @@ class MainWindow(QMainWindow):
         self._set_edit_state(self._redo.pop())
         self._edit_applied()
 
+    def _turn(self, by: int) -> None:
+        """Turn the video `by` degrees clockwise; the crop turns with it."""
+        def apply():
+            e = self.project.edit
+            e.crop = turn_crop(e.crop, by, self.src_info.width, self.src_info.height)
+            e.turn = (e.turn + by) % 360
+            return True
+        self._stop_player()
+        self._edit_change(apply)
+
     def _on_crop_changed(self, rect) -> None:
         def apply():
             try:
@@ -1229,6 +1287,12 @@ class MainWindow(QMainWindow):
         x, y, w, h = self.view.crop_rect()
         nw, nh = (h * ar, h) if w / h > ar else (w, w / ar)
         self._on_crop_changed((x + (w - nw) / 2, y + (h - nh) / 2, nw, nh))
+
+    def _any_angle_toggled(self, on: bool) -> None:
+        if self.project is not None and self.editing and self.project.edit.any_angle != on:
+            self.project.edit.any_angle = on
+            self._mark_dirty()
+            self._set_enabled()  # the button reads "Detect faces" again when the mode changed
 
     def _crop_reset(self) -> None:
         if self.aspect_combo.currentIndex() != 0:
@@ -1255,7 +1319,11 @@ class MainWindow(QMainWindow):
             frame = tr("cropped to {w} × {h}", w=e.crop[2], h=e.crop[3])
         else:
             frame = tr("full frame {w} × {h}", w=src.width, h=src.height)
-        self.edit_summary.setText(f"{when}, {frame}.")
+        turned = {90: tr(", turned right"), 180: tr(", upside down"), 270: tr(", turned left")}.get(e.turn, "")
+        self.edit_summary.setText(f"{when}, {frame}{turned}.")
+        self.any_angle_cb.blockSignals(True)
+        self.any_angle_cb.setChecked(e.any_angle)
+        self.any_angle_cb.blockSignals(False)
 
     def _show_source_frame(self, img: np.ndarray | None) -> None:
         f = self.frame
@@ -1474,7 +1542,7 @@ class MainWindow(QMainWindow):
                 (analysis.wd / "safety_report.json").unlink(missing_ok=True)
                 return result, None
             report = safety_check(result.output, load_target_refs(analysis.wd), analysis.wd,
-                                  progress=progress, cancel=cancel)
+                                  progress=progress, cancel=cancel, any_angle=analysis.any_angle)
             return result, report
 
         self._run_task(job, self._on_render_done, tr("Rendering"))

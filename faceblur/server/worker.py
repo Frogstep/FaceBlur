@@ -45,7 +45,7 @@ class PipelineOps:
         job.update(status="checking", rendered=True, render=info)
         try:
             report = safety_check(result.output, load_target_refs(analysis.wd), analysis.wd,
-                                  progress=progress, cancel=cancel)
+                                  progress=progress, cancel=cancel, any_angle=analysis.any_angle)
         except Cancelled:  # the video is done; only the check was cancelled
             return info
         info.update(safety="done", flagged=len(report["flagged"]))

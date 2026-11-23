@@ -56,10 +56,11 @@ class VideoInfo:
     vfr: bool
     audio: tuple[tuple[int, str], ...] = ()  # usable audio tracks: (stream index, codec name)
     skipped_audio: int = 0  # audio tracks FFmpeg cannot read (left out of the output)
-    # cut & crop (see with_edit); width, height, num_frames and duration above
-    # are then those of the edited video
+    # turn, cut & crop (see turned, with_edit); width, height, num_frames and
+    # duration above are then those of the edited video
     keep: tuple[tuple[int, int], ...] = ()  # kept [start, end) source frames; () = all of them
-    crop: tuple[int, int, int, int] | None = None  # x, y, w, h in display pixels
+    crop: tuple[int, int, int, int] | None = None  # x, y, w, h in display pixels (after turning)
+    turn: int = 0  # degrees clockwise (0/90/180/270), applied before the crop
     source_frames: int = 0  # frames in the source when cut (0: same as num_frames)
 
     @property
@@ -68,7 +69,7 @@ class VideoInfo:
 
     @property
     def edited(self) -> bool:
-        return bool(self.keep or self.crop)
+        return bool(self.keep or self.crop or self.turn)
 
     @property
     def segments(self) -> tuple[tuple[int, int], ...]:
@@ -99,16 +100,34 @@ class VideoInfo:
         """Short id of the cut & crop ("" when unedited), for cache file names."""
         if not self.edited:
             return ""
-        spec = json.dumps([list(map(list, self.keep)), list(self.crop) if self.crop else None])
+        spec = [list(map(list, self.keep)), list(self.crop) if self.crop else None]
+        if self.turn:  # (unturned edits keep the keys they had before turning existed)
+            spec.append(self.turn)
+        spec = json.dumps(spec)
         return hashlib.sha1(spec.encode()).hexdigest()[:10]
+
+    def turned(self, turn: int) -> "VideoInfo":
+        """This (unedited) video turned `turn` degrees clockwise (a multiple of
+        90), e.g. for a camera that filmed on its side. Width and height swap
+        for 90 and 270. A crop given to with_edit afterwards is in the turned
+        picture."""
+        if self.edited:
+            raise ValueError("this video is already edited")
+        turn = int(turn) % 360
+        if turn % 90:
+            raise ValueError(f"the video can only be turned by 90, 180 or 270 degrees (got {turn})")
+        if not turn:
+            return self
+        w, h = (self.height, self.width) if turn % 180 else (self.width, self.height)
+        return replace(self, width=w, height=h, turn=turn)
 
     def with_edit(self, keep=None, crop=None) -> "VideoInfo":
         """This (unedited) video with only the `keep` ranges ([start, end) source
         frames; empty = all) and cropped to `crop` ([x, y, w, h] display pixels;
         None = full frame). Ranges are clipped, sorted and merged; the crop is
         clipped to the frame and rounded to even numbers (4:2:0 video needs
-        them). Returns self when the edit changes nothing."""
-        if self.edited:
+        them). Returns self when the edit changes nothing. May follow turned()."""
+        if self.keep or self.crop:
             raise ValueError("this video is already edited")
         n = self.num_frames
         merged: list[list[int]] = []
@@ -219,12 +238,42 @@ def probe(path: str | Path) -> VideoInfo:
     return VideoInfo(path, w, h, fps, nb, duration, bool(audio), matrix, rng, vfr, tuple(audio), skipped)
 
 
+def _cfr(info: VideoInfo) -> list[str]:
+    """Frames on a constant frame-rate clock: frame N is what the video shows at
+    N / fps. Some cameras leave frame slots empty (an AVI that says 30 fps but
+    holds 25 real frames a second) and phones film at a variable rate; read
+    back to back, such frames drift away from the sound and from frames found
+    by seeking. A missing slot is filled with a neighbouring real frame."""
+    return ["-fps_mode", "cfr", "-r", str(info.fps)]
+
+
+_TURN_FILTER = {90: "transpose=clock", 180: "hflip,vflip", 270: "transpose=cclock"}
+
+
 def _decode_filter(info: VideoInfo) -> str:
     vf = f"scale=in_color_matrix={info.color_matrix}:in_range={info.color_range}"
     if info.crop:
         x, y, w, h = info.crop
         vf = f"crop={w}:{h}:{x}:{y}," + vf
+    if info.turn:
+        vf = f"{_TURN_FILTER[info.turn]}," + vf
     return vf
+
+
+def turn_crop(crop, turn: int, width: int, height: int):
+    """[x, y, w, h] in a width x height picture, moved to where it is after
+    turning the picture `turn` degrees clockwise (None stays None)."""
+    if not crop:
+        return crop
+    x, y, w, h = crop
+    turn %= 360
+    if turn == 90:
+        return [height - (y + h), x, h, w]
+    if turn == 180:
+        return [width - (x + w), height - (y + h), w, h]
+    if turn == 270:
+        return [y, width - (x + w), h, w]
+    return list(crop)
 
 
 class FrameReader:
@@ -262,7 +311,7 @@ class FrameReader:
         cmd += ["-i", str(self.info.path), "-map", "0:v:0", "-vf", _decode_filter(self.info)]
         if count is not None:
             cmd += ["-frames:v", str(count)]
-        cmd += ["-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+        cmd += [*_cfr(self.info), "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
         return cmd
 
     def __iter__(self) -> Iterator[np.ndarray]:
@@ -309,7 +358,7 @@ class FrameGrabber:
         cmd = [
             _ffbin("ffmpeg"), "-v", "error", "-nostdin", "-ss", f"{t:.6f}", "-i", str(self.info.path),
             "-map", "0:v:0", "-frames:v", "1",
-            "-vf", _decode_filter(self.info),
+            "-vf", _decode_filter(self.info), *_cfr(self.info),
             "-f", "rawvideo", "-pix_fmt", "bgr24", "-",
         ]
         out = subprocess.run(cmd, capture_output=True, **_NOWIN).stdout

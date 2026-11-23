@@ -51,10 +51,16 @@ def temp_dir() -> Path:
     return d
 
 
-def detections_cache(wd: Path, info: VideoInfo) -> Path:
+def scan_key(info: VideoInfo, any_angle: bool = False) -> str:
+    """Names the scan results of this cut & crop and detection mode. "cfr":
+    frames counted on a constant frame-rate clock (scans from before that
+    counted the frames a video holds, which differs when it has gaps)."""
+    return "_".join(p for p in (info.edit_key(), "any" if any_angle else "", "cfr") if p)
+
+
+def detections_cache(wd: Path, info: VideoInfo, any_angle: bool = False) -> Path:
     """Cached detections for this cut & crop (a changed edit is scanned again)."""
-    key = info.edit_key()
-    return wd / (f"detections_{key}.npz" if key else "detections.npz")
+    return wd / f"detections_{scan_key(info, any_angle)}.npz"
 
 
 def clear_scan_cache(wd: Path) -> None:
@@ -67,7 +73,7 @@ def open_video(video: str | Path, edit: Edit | None = None) -> VideoInfo:
     """probe() with the project's cut & crop applied."""
     info = probe(video)
     if edit is not None and edit.active:
-        info = info.with_edit(edit.keep, edit.crop)
+        info = info.turned(edit.turn).with_edit(edit.keep, edit.crop)
     return info
 
 
@@ -160,9 +166,11 @@ class Analysis:
     """Everything known about a video after the face scan: detections and the
     face cards the user labels."""
 
-    def __init__(self, video: Path, info: VideoInfo, dets: Detections, wd: Path | None = None):
+    def __init__(self, video: Path, info: VideoInfo, dets: Detections, wd: Path | None = None,
+                 any_angle: bool = False):
         self.video = video
         self.info = info
+        self.any_angle = any_angle  # faces were looked for at every angle (Edit.any_angle)
         self.dets = dets
         self.wd = workdir(video, wd)
         self.cards: list[Card] = build_cards(dets)
@@ -178,7 +186,8 @@ class Analysis:
         video = Path(video).resolve()
         info = open_video(video, edit)
         wd = workdir(video, wd)
-        cache = detections_cache(wd, info)
+        any_angle = bool(edit and edit.any_angle)
+        cache = detections_cache(wd, info, any_angle)
         if cache.exists():
             dets = Detections.load(cache)
         else:
@@ -186,8 +195,8 @@ class Analysis:
                 progress("Loading face models", 0, 0)
             analyzer = get_analyzer()
             cb = (lambda d, t: progress("Detecting faces", d, t)) if progress else None
-            dets = scan(info, analyzer, cache, progress=cb, cancel=cancel)
-        return cls(video, info, dets, wd)
+            dets = scan(info, analyzer, cache, progress=cb, cancel=cancel, any_angle=any_angle)
+        return cls(video, info, dets, wd, any_angle)
 
     def detections_in(self, frame: int) -> np.ndarray:
         if 0 <= frame < len(self._frame_index):
@@ -319,8 +328,8 @@ def card_thumbnails(analysis: Analysis, size: int = 96, progress: Progress | Non
     (one frame seek per distinct frame)."""
     from .video_io import FrameGrabber
 
-    key = analysis.info.edit_key()
-    cache = analysis.wd / (f"thumbs_{size}_{key}.npz" if key else f"thumbs_{size}.npz")
+    key = scan_key(analysis.info, analysis.any_angle)
+    cache = analysis.wd / f"thumbs_{size}_{key}.npz"
     want = sorted({i for c in analysis.cards for i in c.samples})
     if cache.exists():
         z = np.load(cache)
@@ -482,7 +491,8 @@ def _load_face_positions(wd: Path) -> tuple[dict, dict]:
 
 
 def safety_check(masked: str | Path, refs_list: list[np.ndarray], wd: Path,
-                 progress: Progress | None = None, cancel: Cancel | None = None, thr: float = 0.28) -> dict:
+                 progress: Progress | None = None, cancel: Cancel | None = None, thr: float = 0.28,
+                 any_angle: bool = False) -> dict:
     """Re-detects faces in the rendered video and flags frames where any of the
     blurred faces is still recognizable. Writes flagged/*.jpg and safety_report.json.
 
@@ -501,7 +511,7 @@ def safety_check(masked: str | Path, refs_list: list[np.ndarray], wd: Path,
         p.unlink()
     flagged = []
     if refs_list:
-        stream = analyzer.analyze_stream(FrameReader(info))
+        stream = analyzer.analyze_stream(FrameReader(info), any_angle=any_angle)
         for f, (frame, faces) in enumerate(stream):
             if cancel and cancel():
                 stream.close()

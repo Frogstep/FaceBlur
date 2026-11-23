@@ -78,7 +78,10 @@ class FakeOps:
         from faceblur.pipeline import Analysis, card_thumbnails
 
         job.work.mkdir(parents=True, exist_ok=True)
-        fake_detections().save(job.work / "detections.npz")
+        from faceblur.pipeline import detections_cache
+        from faceblur.video_io import probe
+
+        fake_detections().save(detections_cache(job.work, probe(job.video)))
         progress("Detecting faces", FRAMES, FRAMES)
         a = Analysis.open(job.video, wd=job.work)
         job.store.put_analysis(job, a, card_thumbnails(a, 160))

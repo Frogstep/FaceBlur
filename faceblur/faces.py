@@ -102,6 +102,32 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, thr: float) -> list[int]:
     return keep
 
 
+ANY_ANGLE = (0, 90, 180, 270)  # SCRFD.detect rotations for faces at any angle
+_ROTATE = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
+
+
+def _unrotate_points(p: np.ndarray, angle: int, w: int, h: int) -> np.ndarray:
+    """Points found in the image turned `angle` degrees clockwise, back in the
+    w x h original."""
+    x, y = p[..., 0], p[..., 1]
+    if angle == 90:
+        x, y = y, h - x
+    elif angle == 180:
+        x, y = w - x, h - y
+    elif angle == 270:
+        x, y = w - y, x
+    return np.stack([x, y], axis=-1)
+
+
+def _unrotate(boxes: np.ndarray, kps: np.ndarray, angle: int, w: int, h: int) -> tuple[np.ndarray, np.ndarray]:
+    a = _unrotate_points(boxes[:, :2], angle, w, h)
+    b = _unrotate_points(boxes[:, 2:], angle, w, h)
+    boxes = np.concatenate([np.minimum(a, b), np.maximum(a, b)], axis=1).astype(np.float32)
+    # landmarks keep their meaning (left eye stays left eye of the face);
+    # ArcFace alignment turns the face upright from them
+    return boxes, _unrotate_points(kps, angle, w, h).astype(np.float32)
+
+
 class SCRFD:
     def __init__(self, path: Path = MODELS_DIR / "det_10g.onnx", input_size: int = 1280,
                  conf: float = 0.3):
@@ -153,10 +179,15 @@ class SCRFD:
             return np.zeros((0, 4), np.float32), np.zeros(0, np.float32), np.zeros((0, 5, 2), np.float32)
         return (np.concatenate(all_b) / scale, np.concatenate(all_s), np.concatenate(all_k) / scale)
 
-    def detect(self, images: list[np.ndarray], upscale_small: bool = True) -> list[Face]:
+    def detect(self, images: list[np.ndarray], upscale_small: bool = True,
+               rotations: tuple[int, ...] = (0,)) -> list[Face]:
         """Detect on several versions of the same frame (e.g. original and
         enhanced) and merge with NMS. Over-detects on purpose; identity
-        matching decides what is the target."""
+        matching decides what is the target.
+
+        rotations: also look at each version turned by these angles (degrees
+        clockwise, multiples of 90). The detector only finds roughly upright
+        faces, so a camera on its side or a person lying down needs ANY_ANGLE."""
         bs, ss, ks = [], [], []
         for img in images:
             h, w = img.shape[:2]
@@ -164,10 +195,13 @@ class SCRFD:
             if upscale_small and min(h, w) < 720:
                 factor = 2.0
                 img = cv2.resize(img, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC)
-            b, s, k = self.detect_raw(img)
-            bs.append(b / factor)
-            ss.append(s)
-            ks.append(k / factor)
+            for angle in rotations:
+                b, s, k = self.detect_raw(img if angle == 0 else cv2.rotate(img, _ROTATE[angle]))
+                if angle:
+                    b, k = _unrotate(b, k, angle, img.shape[1], img.shape[0])
+                bs.append(b / factor)
+                ss.append(s)
+                ks.append(k / factor)
         boxes, scores, kps = np.concatenate(bs), np.concatenate(ss), np.concatenate(ks)
         if not len(scores):
             return []
@@ -224,17 +258,18 @@ class FaceAnalyzer:
     def providers(self) -> list[str]:
         return self.det.sess.get_providers()
 
-    def analyze(self, bgr: np.ndarray, enh: np.ndarray | None = None) -> list[Face]:
-        """enh: the frame already passed through enhance_for_detection (optional)."""
+    def analyze(self, bgr: np.ndarray, enh: np.ndarray | None = None, any_angle: bool = False) -> list[Face]:
+        """enh: the frame already passed through enhance_for_detection (optional);
+        any_angle: also find sideways and upside-down faces (about 4x slower)."""
         if enh is None:
             enh = enhance_for_detection(bgr)
-        faces = self.det.detect([bgr, enh])
+        faces = self.det.detect([bgr, enh], rotations=ANY_ANGLE if any_angle else (0,))
         # embed from the enhanced copy so dark frames give usable embeddings;
         # the reference is built the same way so the two stay comparable
         self.rec.embed(enh, faces)
         return faces
 
-    def analyze_stream(self, frames, workers: int | None = None):
+    def analyze_stream(self, frames, workers: int | None = None, any_angle: bool = False):
         """Yields (frame, faces) for each frame, in order.
 
         The CPU-heavy enhancement (CLAHE, gamma, denoise of dark frames) runs
@@ -263,7 +298,7 @@ class FaceAnalyzer:
                 while pending:
                     fr, fut = pending.popleft()
                     fill()
-                    yield fr, self.analyze(fr, fut.result())
+                    yield fr, self.analyze(fr, fut.result(), any_angle)
             finally:
                 for _, fut in pending:
                     fut.cancel()
