@@ -160,6 +160,12 @@ def test_reset_project_starts_over(window, monkeypatch):
     w.seek(5)
     w._cut_in()
     w._on_crop_changed((10, 20, 160, 120))
+    w._finish_edit()
+    started.clear()  # (the scan it starts is not run here)
+    w.seek(3)
+    w._add_manual([10, 10, 40, 40])  # a drawn "blur this area"
+    w._recompute()  # (normally on a short timer)
+    assert w.corr_list.count() == 1
     w.project.labels.append(Label(0, [1, 2, 3, 4], 0))
     w.project.settings.style = "fill"
     w.save_project()
@@ -181,5 +187,32 @@ def test_reset_project_starts_over(window, monkeypatch):
     assert not project_file.exists() and not (wd / "detections.npz").exists() and not (wd / "flagged").exists()
     assert video.exists() and output.read_bytes() == b"rendered"  # the user's files stay
     p = w.project
-    assert not p.edit.active and not p.labels and p.settings.style == "pixelate"
+    assert not p.edit.active and not p.labels and not p.manual and p.settings.style == "pixelate"
+    assert w.corr_list.count() == 0  # the drawn box is gone from the list too
     assert w.editing and w.info.num_frames == 30 and w.cuts.keep() == [] and started == []
+
+
+def test_cancelled_scan_goes_back_to_cut_and_crop(window):
+    """After cancelling the face scan, the cut & crop and "Faces at any angle"
+    can be changed before detecting again."""
+    w, started = window
+    w._finish_edit()  # Detect faces
+    assert not w.editing and started == ["Detecting faces"] and w.analysis is None
+    w._on_cancelled("Detecting faces")  # what the task reports when stopped
+    w._on_task_finished()
+    assert w.editing and w.any_angle_cb.isEnabled()
+    w.any_angle_cb.setChecked(True)
+    assert w.project.edit.any_angle and "Detect faces" in w.edit_btn.text()
+    w._finish_edit()
+    assert started == ["Detecting faces", "Detecting faces"]
+
+
+def test_failed_scan_goes_back_to_cut_and_crop(window, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    w, started = window
+    w._finish_edit()
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+    w._on_failed("decoder error\n\ndetails")
+    w._on_task_finished()
+    assert w.editing and w.any_angle_cb.isEnabled()
