@@ -62,6 +62,40 @@ def fmt_time(seconds: float) -> str:
     return f"{int(m)}:{s:04.1f}"
 
 
+def _transport_icon(kind: str, color: QColor) -> QIcon:
+    """Player buttons drawn in one style: "play", "pause", "frame" (one frame
+    on: triangle and bar), "second" (one second on: two triangles and bar);
+    "back_..." is the mirror image."""
+    px = QPixmap(44, 44)  # drawn at 2x, shown at 22x22
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(color)
+    if kind.startswith("back_"):
+        kind = kind[5:]
+        p.translate(44, 0)
+        p.scale(-1, 1)
+
+    def tri(x0, x1):  # pointing right, from x0 to x1
+        p.drawPolygon(QPolygonF([QPointF(x0, 9), QPointF(x1, 22), QPointF(x0, 35)]))
+
+    if kind == "play":
+        tri(13, 35)
+    elif kind == "pause":
+        p.drawRoundedRect(QRectF(11, 9, 8, 26), 1.5, 1.5)
+        p.drawRoundedRect(QRectF(25, 9, 8, 26), 1.5, 1.5)
+    elif kind == "frame":
+        tri(11, 29)
+        p.drawRoundedRect(QRectF(29, 9, 5, 26), 1.5, 1.5)
+    elif kind == "second":
+        tri(5, 19)
+        tri(18, 32)
+        p.drawRoundedRect(QRectF(32, 9, 5, 26), 1.5, 1.5)
+    p.end()
+    return QIcon(px)
+
+
 def _turn_icon(clockwise: bool, color: QColor) -> QIcon:
     """A three-quarter circle with an arrowhead: turn the picture left or right."""
     px = QPixmap(40, 40)  # drawn at 2x, shown at 20x20
@@ -112,6 +146,7 @@ class MainWindow(QMainWindow):
         self._redo: list = []
         self._edit_confirmed = False  # the user agreed to clear face choices for this edit session
         self._scanned_edit: Edit | None = None  # the cut & crop the current face scan was made for
+        self._back_to_edit = False  # a face scan stopped without result: show cut & crop when it ends
         self._play_info = None  # what the player plays in edit mode (the kept parts, uncropped)
 
         self._build_ui()
@@ -160,20 +195,23 @@ class MainWindow(QMainWindow):
         lv.addWidget(self.timeline)
 
         bar = QHBoxLayout()
-        def tbtn(text, tip, fn):
+        icon_color = self.palette().buttonText().color()
+        self._play_icons = {k: _transport_icon(k, icon_color) for k in ("play", "pause")}
+
+        def tbtn(kind, tip, fn):
             b = QToolButton()
-            b.setText(text)
+            b.setIcon(self._play_icons.get(kind) or _transport_icon(kind, icon_color))
+            b.setIconSize(QSize(22, 22))
             b.setToolTip(tr(tip))
             b.setMinimumSize(44, 36)
-            b.setStyleSheet("QToolButton { font-size: 18px; padding: 2px 8px; }")
             b.clicked.connect(fn)
             bar.addWidget(b)
             return b
-        tbtn("⏮", "Previous second (Shift+Left)", lambda: self.step(-self._fps_int()))
-        tbtn("◀", "Previous frame (Left)", lambda: self.step(-1))
-        self.play_btn = tbtn("▶", "Play / pause (Space)", self.toggle_play)
-        tbtn("▶|", "Next frame (Right)", lambda: self.step(1))
-        tbtn("⏭", "Next second (Shift+Right)", lambda: self.step(self._fps_int()))
+        tbtn("back_second", "Previous second (Shift+Left)", lambda: self.step(-self._fps_int()))
+        tbtn("back_frame", "Previous frame (Left)", lambda: self.step(-1))
+        self.play_btn = tbtn("play", "Play / pause (Space)", self.toggle_play)
+        tbtn("frame", "Next frame (Right)", lambda: self.step(1))
+        tbtn("second", "Next second (Shift+Right)", lambda: self.step(self._fps_int()))
         self.pos_label = QLabel("–")
         self.pos_label.setMinimumWidth(190)
         bar.addWidget(self.pos_label)
@@ -614,6 +652,7 @@ class MainWindow(QMainWindow):
         self.timeline.set_flags([])
         self._load_settings_to_ui()
         self._clear_faces()
+        self._refresh_corrections()  # the drawn boxes and exclusions of this project, not the last one's
         self.safety_list.clear()
         self.safety_label.setText(self._safety_idle_text())
         self.show_frame()
@@ -1070,7 +1109,7 @@ class MainWindow(QMainWindow):
         self.player.tick.connect(self._on_play_tick)
         self.player.finished.connect(self._on_play_finished)
         self.player.start()
-        self.play_btn.setText("⏸")
+        self.play_btn.setIcon(self._play_icons["pause"])
 
     def _on_play_tick(self) -> None:
         if self.player is None:
@@ -1084,14 +1123,14 @@ class MainWindow(QMainWindow):
     def _on_play_finished(self) -> None:
         if self.player is not None and self.sender() is self.player:
             self.player = None
-            self.play_btn.setText("▶")
+            self.play_btn.setIcon(self._play_icons["play"])
 
     def _stop_player(self) -> None:
         if self.player is not None:
             p, self.player = self.player, None
             p.stop()
             p.wait(2000)
-            self.play_btn.setText("▶")
+            self.play_btn.setIcon(self._play_icons["play"])
 
     # ============================================================ cut & crop
     def _edit_button(self) -> None:
@@ -1481,8 +1520,10 @@ class MainWindow(QMainWindow):
 
     def _on_cancelled(self, label: str) -> None:
         self.status.setText(tr("{label} cancelled.", label=label))
+        self._back_to_edit = self.analysis is None
 
     def _on_failed(self, msg: str) -> None:
+        self._back_to_edit = self.analysis is None
         self.status.setText(tr("Failed: ") + msg.splitlines()[0])
         box = QMessageBox(QMessageBox.Icon.Critical, tr("Error"), msg.split("\n\n")[0], parent=self)
         box.setDetailedText(msg)
@@ -1496,6 +1537,13 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.progress.setFormat("")
         self._set_enabled()
+        back, self._back_to_edit = self._back_to_edit, False
+        if back and self.project is not None and self.analysis is None and not self.editing:
+            # the face scan was cancelled or failed: back to where it was started from, so
+            # the cut & crop and "Faces at any angle" can be changed before trying again
+            status = self.status.text()
+            self._enter_edit()
+            self.status.setText(status)
 
     def cancel_task(self) -> None:
         if self.task is not None:
