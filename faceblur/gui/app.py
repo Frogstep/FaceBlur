@@ -262,12 +262,20 @@ class MainWindow(QMainWindow):
         self.pad_spin.setToolTip(tr("Extra margin around each face box"))
         self.sam_cb = QCheckBox(tr("Precise outline with SAM 2 (slower)"))
         self.sam_cb.setChecked(False)
+        self.sam_model_combo = QComboBox()
+        self._fill_sam_models()
+        self.sam_model_combo.setToolTip(tr("Bigger models follow the face outline more exactly but render slower. "
+                                           "A model that is not downloaded yet is downloaded on the first render."))
+        self.sam_model_combo.setEnabled(False)
+        self.sam_cb.toggled.connect(self.sam_model_combo.setEnabled)
         form.addRow(tr("Style"), self.style_combo)
         form.addRow(tr("Strength"), self.strength_spin)
         form.addRow(tr("Margin"), self.pad_spin)
         form.addRow(self.sam_cb)
+        form.addRow(tr("SAM 2 model"), self.sam_model_combo)
         for w, sig in ((self.style_combo, "currentIndexChanged"), (self.strength_spin, "valueChanged"),
-                       (self.pad_spin, "valueChanged"), (self.sam_cb, "toggled")):
+                       (self.pad_spin, "valueChanged"), (self.sam_cb, "toggled"),
+                       (self.sam_model_combo, "currentIndexChanged")):
             getattr(w, sig).connect(self._settings_changed)
         sv.addWidget(g)
 
@@ -729,7 +737,7 @@ class MainWindow(QMainWindow):
     # ============================================================ settings
     def _load_settings_to_ui(self) -> None:
         s = self.project.settings
-        widgets = (self.style_combo, self.strength_spin, self.pad_spin, self.sam_cb,
+        widgets = (self.style_combo, self.strength_spin, self.pad_spin, self.sam_cb, self.sam_model_combo,
                    self.codec_combo, self.quality_combo)
         for w in widgets:
             w.blockSignals(True)
@@ -742,6 +750,8 @@ class MainWindow(QMainWindow):
         self.strength_spin.setValue(s.strength)
         self.pad_spin.setValue(s.pad)
         self.sam_cb.setChecked(s.use_sam)
+        self.sam_model_combo.setEnabled(s.use_sam)
+        self.sam_model_combo.setCurrentIndex(max(0, self.sam_model_combo.findData(s.sam_model)))
         for w in widgets:
             w.blockSignals(False)
         self.out_edit.setText(self.project.output)
@@ -754,6 +764,7 @@ class MainWindow(QMainWindow):
         s.strength = self.strength_spin.value()
         s.pad = self.pad_spin.value()
         s.use_sam = self.sam_cb.isChecked()
+        s.sam_model = self.sam_model_combo.currentData() or "auto"
         s.codec = self.codec_combo.currentData()
         if self.quality_combo.currentData() != s.quality:
             s.quality = self.quality_combo.currentData()
@@ -761,6 +772,30 @@ class MainWindow(QMainWindow):
             self.quality_combo.setToolTip(tr("Higher quality makes a bigger file"))
         self._mark_dirty()
         self.show_frame()
+
+    def _fill_sam_models(self, detect: bool = False) -> None:
+        """The SAM 2 model choices; sizes that are not downloaded yet say so.
+        detect: also name the size "auto" means on this PC (checks the GPU,
+        which loads PyTorch: not while the window is being built)."""
+        from .. import device
+        from ..setup_models import SAM_MODELS
+
+        names = {"tiny": tr("Tiny (fastest)"), "small": tr("Small"), "base_plus": tr("Base+"),
+                 "large": tr("Large (most precise)")}
+        on_disk = {size: (it.folder / it.name).exists() for size, it in SAM_MODELS.items()}
+        keep = self.sam_model_combo.currentData()
+        self.sam_model_combo.blockSignals(True)
+        self.sam_model_combo.clear()
+        if detect:  # the same rule as segment.model_for, without importing PyTorch here
+            auto = "tiny" if device.sam_device() == "cpu" and on_disk["tiny"] else "large"
+            self.sam_model_combo.addItem(tr("Auto ({model})", model={"tiny": "Tiny", "large": "Large"}[auto]), "auto")
+        else:
+            self.sam_model_combo.addItem(tr("Auto"), "auto")
+        for size, name in names.items():
+            self.sam_model_combo.addItem(name if on_disk[size] else tr("{model} — downloads on first use",
+                                                                       model=name), size)
+        self.sam_model_combo.setCurrentIndex(max(0, self.sam_model_combo.findData(keep)))
+        self.sam_model_combo.blockSignals(False)
 
     def _device_changed(self, *_):
         from .. import device
@@ -780,6 +815,7 @@ class MainWindow(QMainWindow):
             parts = device.summary().split(": ", 1)[1].split(", ")
             note = ", ".join(tr(k) + ":" + v for k, _, v in (x.partition(":") for x in parts))
         self.device_label.setText(note)
+        self._fill_sam_models(detect=True)  # "auto" means another size on the CPU
 
     def _output_changed(self) -> None:
         if self.project and self.out_edit.text().strip() != self.project.output:
@@ -1445,6 +1481,7 @@ class MainWindow(QMainWindow):
 
     def _on_render_done(self, payload) -> None:
         result, report = payload
+        self._fill_sam_models(detect=True)  # a model downloaded by this render loses its note
         self.status.setText(tr("Wrote {name}: {frames} frames at {fps} fps. Frames with no mask at all: {unmasked}.",
                                name=result.output.name, frames=result.frames, fps=f"{result.fps:.1f}",
                                unmasked=result.unmasked) + "\n" + "\n".join(self._render_log))

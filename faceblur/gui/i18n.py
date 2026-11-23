@@ -98,6 +98,18 @@ _RU = {
     "Higher = coarser blocks": "Больше = крупнее блоки",
     "Extra margin around each face box": "Дополнительный отступ вокруг каждой рамки лица",
     "Precise outline with SAM 2 (slower)": "Точный контур с SAM 2 (медленнее)",
+    "SAM 2 model": "Модель SAM 2",
+    "Bigger models follow the face outline more exactly but render slower. "
+    "A model that is not downloaded yet is downloaded on the first render.":
+        "Большие модели точнее повторяют контур лица, но рендер идёт медленнее. "
+        "Ещё не скачанная модель скачивается при первом рендере.",
+    "Auto": "Авто",
+    "Auto ({model})": "Авто ({model})",
+    "Tiny (fastest)": "Tiny (самая быстрая)",
+    "Small": "Small",
+    "Base+": "Base+",
+    "Large (most precise)": "Large (самая точная)",
+    "{model} — downloads on first use": "{model} — скачается при первом рендере",
     "Style": "Стиль",
     "Strength": "Сила",
     "Margin": "Отступ",
@@ -184,6 +196,7 @@ _RU = {
     "Loading face models": "Загрузка моделей лиц",
     "Preparing face cards": "Подготовка карточек лиц",
     "Loading SAM 2": "Загрузка SAM 2",
+    "Downloading the SAM 2 model": "Скачивание модели SAM 2",
     "Rendering": "Рендер",
     "Saving the video": "Сохранение видео",
     "Note: variable frame rate video; the output will use a constant frame rate.":

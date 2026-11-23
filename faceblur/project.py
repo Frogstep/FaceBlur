@@ -67,6 +67,7 @@ class Settings:
     strength: float = 1.0
     pad: float = 0.3
     use_sam: bool = False  # SAM 2 face outlines (slow); off: ellipses
+    sam_model: str = "auto"  # SAM 2.1 size: auto / tiny / small / base_plus / large (segment.CHOICES)
     codec: str = "h265"  # output format: h265 (smaller files) / h264 (plays everywhere)
     quality: str = "high"  # best / high / medium / small (see video_io.QUALITY)
     cq: int | None = None  # exact CQ/CRF number instead of the level (lower = better)

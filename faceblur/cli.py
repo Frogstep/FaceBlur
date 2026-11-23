@@ -250,6 +250,9 @@ def cmd_render(args) -> int:
         s.use_sam = True
     if args.no_sam:
         s.use_sam = False
+    if args.sam_model:
+        s.sam_model = args.sam_model
+        s.use_sam = True
 
     analysis = _open(Path(project.video), project.edit)
     if not args.project:
@@ -370,6 +373,9 @@ def main(argv=None) -> int:
                    help="exact encoder quality instead of --quality (NVENC CQ / x264 CRF; lower = better)")
     r.add_argument("--sam", action="store_true", help="precise face outlines with SAM 2 (slower; off by default)")
     r.add_argument("--no-sam", action="store_true", help="box/ellipse masking only (the default for new projects)")
+    r.add_argument("--sam-model", choices=["auto", "tiny", "small", "base_plus", "large"],
+                   help="SAM 2.1 size (implies --sam): tiny = fastest, large = most precise; auto = large on "
+                        "the GPU, tiny on the CPU. A size not downloaded yet is downloaded first")
     r.add_argument("--debug", action="store_true", help="also write work/<name>/debug.mp4 overlay")
     r.add_argument("--no-check", action="store_true", help="skip the safety pass")
     r.set_defaults(fn=cmd_render)

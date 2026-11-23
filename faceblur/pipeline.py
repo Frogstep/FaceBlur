@@ -96,19 +96,44 @@ def get_analyzer():
         return _ANALYZER[key]
 
 
-_PREDICTOR: dict = {}  # SAM 2 is loaded once per device (up to 1 GB of weights)
+_PREDICTOR: dict = {}  # one SAM 2 model kept loaded (up to 1 GB of weights)
 
 
-def get_predictor():
+def sam_model(choice: str = "auto") -> str:
+    """The SAM 2.1 size a render uses for the setting `choice` on this PC."""
     from . import device
-    from .segment import load_predictor
+    from .segment import model_for
+
+    return model_for(device.sam_device(), choice)
+
+
+def get_predictor(choice: str = "auto", progress: Progress | None = None):
+    """The SAM 2 predictor for Settings.sam_model `choice`; a size that is not
+    downloaded yet is downloaded first (progress shows it)."""
+    from . import device
+    from .segment import is_downloaded, load_predictor
 
     device.check_forced_gpu()
-    key = device.sam_device()
+    dev = device.sam_device()
+    size = sam_model(choice)
+    key = (dev, size)
     with _MODEL_LOCK:
         if key not in _PREDICTOR:
+            if not is_downloaded(size):
+                from .setup_models import fetch_sam
+
+                if progress:
+                    progress("Downloading the SAM 2 model", 0, 0)
+                fetch_sam(size, (lambda d, t: progress("Downloading the SAM 2 model", d >> 20, t >> 20))
+                          if progress else None)
+            if progress:
+                progress("Loading SAM 2", 0, 0)
             _PREDICTOR.clear()
-            _PREDICTOR[key] = load_predictor(key)
+            if dev == "cuda":
+                import torch
+
+                torch.cuda.empty_cache()  # free the previous model before loading the next
+            _PREDICTOR[key] = load_predictor(dev, size)
         return _PREDICTOR[key]
 
 
@@ -346,11 +371,12 @@ def render(project: Project, analysis: Analysis, progress: Progress | None = Non
 
     device.check_forced_gpu()
     log(device.summary())
-    if s.use_sam and device.sam_device() == "cpu":
-        from .segment import model_for
-
-        log(f"SAM 2 runs on the CPU ({model_for('cpu')} model): this is slow. "
-            f"Turning SAM 2 off (ellipse masks) is much faster.")
+    if s.use_sam:
+        size = sam_model(s.sam_model)
+        log(f"SAM 2.1 model: {size}" + (" (auto)" if s.sam_model == "auto" else ""))
+        if device.sam_device() == "cpu":
+            log(f"SAM 2 runs on the CPU ({size} model): this is slow. "
+                f"Turning SAM 2 off (ellipse masks) is much faster.")
     for p, plan in zip(inputs, plans):
         covered = sum(1 for b in plan.boxes if b)
         log(f"{p.name}: face box on {covered}/{dets.num_frames} frames "
@@ -362,9 +388,7 @@ def render(project: Project, analysis: Analysis, progress: Progress | None = Non
     if s.use_sam:
         from .segment import Segmenter
 
-        if progress:
-            progress("Loading SAM 2", 0, 0)
-        stream = Segmenter(get_predictor(), cancel=cancel).run(frames, plans)
+        stream = Segmenter(get_predictor(s.sam_model, progress), cancel=cancel).run(frames, plans)
     else:
         stream = ((fr, None, "off") for fr in frames)
 
