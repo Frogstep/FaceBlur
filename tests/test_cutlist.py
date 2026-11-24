@@ -163,6 +163,7 @@ def test_reset_project_starts_over(window, monkeypatch):
     w._finish_edit()
     started.clear()  # (the scan it starts is not run here)
     w.seek(3)
+    monkeypatch.setattr(w, "_ask_duration", lambda *a, **k: 5)  # the duration dialog: 5 frames
     w._add_manual([10, 10, 40, 40])  # a drawn "blur this area"
     w._recompute()  # (normally on a short timer)
     assert w.corr_list.count() == 1
@@ -216,3 +217,63 @@ def test_failed_scan_goes_back_to_cut_and_crop(window, monkeypatch):
     w._on_failed("decoder error\n\ndetails")
     w._on_task_finished()
     assert w.editing and w.any_angle_cb.isEnabled()
+
+
+def _scanned(w):
+    """The window after cut & crop, as if the face scan had run (no faces)."""
+    w._finish_edit()
+    w._recompute()
+    return w
+
+
+def test_drawn_box_asks_how_long_and_reaches_forward(window, monkeypatch):
+    w, _ = window
+    _scanned(w)
+    w.seek(4)
+    asked = []
+
+    def ask(frame, frames, without, title, box=None):
+        asked.append((frame, without, box is not None))
+        return answers.pop(0)
+
+    answers = [None, 6]
+    monkeypatch.setattr(w, "_ask_duration", ask)
+    w._on_box_drawn([10, 10, 40, 40], None)  # cancelled: nothing is added
+    assert w.project.manual == []
+    w._on_box_drawn([10, 10, 40, 40], None)
+    (m,) = w.project.manual
+    assert (m.frame, m.first, m.last) == (4, 4, 9)
+    assert asked == [(4, None, True), (4, None, True)]
+    w._recompute()
+    assert w.corr_list.count() == 1
+
+    answers.append(2)  # change its duration later
+    w._edit_manual(0)
+    assert (m.first, m.last) == (4, 5) and asked[-1] == (4, 0, False)
+
+
+def test_duration_dialog(qapp):
+    import numpy as np
+
+    from faceblur.gui.app import fmt_time
+    from faceblur.gui.manual_dialog import DurationDialog, seconds_to_frames
+    from faceblur.gui.widgets import Timeline
+
+    assert seconds_to_frames(1.0, 25.0, 100) == 25
+    assert seconds_to_frames(0.01, 25.0, 100) == 1 and seconds_to_frames(9.0, 25.0, 100) == 100
+    tl = Timeline()
+    tl.set_length(300, 25.0)
+    lv = np.zeros(300, np.int8)
+    lv[:100] = 2
+    lv[140:] = 2
+    d = DurationDialog(None, 100, 300, 25.0, lv, 25, tl, fmt_time, "t")
+    assert d.frames == 25 and tl.preview == (100, 124)
+    d.next_btn.click()  # up to where the blur starts again
+    assert d.frames == 40 and tl.preview == (100, 139)
+    d.spin.setValue(2.0)
+    assert d.frames == 50
+    d.reject()
+    assert tl.preview is None
+    d = DurationDialog(None, 290, 300, 25.0, np.zeros(300), 25, tl, fmt_time, "t")
+    assert d.frames == 10 and not d.next_btn.isEnabled()  # clamped to the video; nothing blurred later
+    d.reject()

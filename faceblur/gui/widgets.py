@@ -346,6 +346,7 @@ class Timeline(QWidget):
         self.tracks: list[tuple[QColor, np.ndarray]] = []
         self.flags: list[int] = []
         self.parts: list | None = None  # cut & crop: [start, end, removed] per part of the source
+        self.preview: tuple[int, int] | None = None  # frames (first, last) a drawn box would cover
         self._cache_key = None
         self._cache: list[np.ndarray] = []
 
@@ -377,6 +378,11 @@ class Timeline(QWidget):
 
     def set_position(self, f: int) -> None:
         self.pos = f
+        self.update()
+
+    def set_preview(self, frames: tuple[int, int] | None) -> None:
+        """Highlight the frames (first, last) a drawn box would cover (None: off)."""
+        self.preview = frames
         self.update()
 
     def _columns(self, w: int) -> list[np.ndarray]:
@@ -432,6 +438,15 @@ class Timeline(QWidget):
                 for a, b in zip(starts, ends):
                     p.fillRect(int(a), top, int(b - a + 1), 7, c)
             top += 10
+        if self.preview is not None:
+            a, b = self.preview
+            x1 = int(self._x(a))
+            x2 = max(int(self._x(b + 1)), x1 + 2)
+            r = QRectF(x1, 6, x2 - x1, max(top, 18) - 4)
+            p.fillRect(r, QColor(255, 212, 0, 110))
+            p.setPen(QPen(QColor("#ffd400"), 1.5))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(r)
         p.setPen(QPen(EXCLUDED_COLOR, 1))
         for f in self.flags:
             x = int(self._x(f))
