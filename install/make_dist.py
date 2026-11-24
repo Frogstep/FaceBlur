@@ -32,7 +32,7 @@ ONNXRUNTIME = {"gpu": "onnxruntime-gpu==1.32.0", "cpu": "onnxruntime==1.32.0"}
 LOCKS = [f"install/requirements-{p}-{v}.txt" for p in PLATFORMS for v in ONNXRUNTIME]
 SCRIPTS = ["install.bat", "FaceBlur.bat", "FaceBlurServer.bat", "update.bat",
            "install.sh", "FaceBlur.sh", "update.sh"]
-FILES = SCRIPTS + ["README.md", "LICENSE", "install/update.py"] + LOCKS
+FILES = SCRIPTS + ["README.md", "DEVELOPMENT.md", "LICENSE", "install/update.py"] + LOCKS
 VERSION_FILE = ROOT / "faceblur" / "_version.py"  # only inside published zips
 # SHA-256 of what the locks were made from, so publish.py notices requirements.in
 # changes that were not locked (git checkouts reset file dates, so dates cannot tell)

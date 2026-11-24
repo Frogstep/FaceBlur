@@ -7,7 +7,7 @@
 The version is today's date (2026.11.20), with .2, .3, ... for more releases the same
 day. It is written into faceblur/_version.py inside the zip only. The release goes to the
 public repo named in install/update.py (RELEASES_REPO), which holds only the release zips:
-this source repo stays private. Needs the GitHub CLI (gh), signed in.
+they are kept apart from this source repo. Needs the GitHub CLI (gh), signed in.
 
 The shipped files must be committed first, so every release matches a commit; the commit
 gets a local tag v<version>. The package locks must be made from the current
@@ -30,7 +30,7 @@ import make_dist  # noqa: E402
 from update import RELEASES_REPO, parse_version  # noqa: E402
 
 ROOT = make_dist.ROOT
-SHIPPED = ["faceblur", "install"] + make_dist.SCRIPTS + ["README.md", "LICENSE"]
+SHIPPED = ["faceblur", "install"] + make_dist.SCRIPTS + ["README.md", "DEVELOPMENT.md", "LICENSE"]
 
 
 def run(*cmd: str, check: bool = True) -> subprocess.CompletedProcess:
