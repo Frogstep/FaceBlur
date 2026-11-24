@@ -141,11 +141,24 @@ def _box_iou(a, b) -> float:
 
 @dataclass
 class ManualBox:
-    """User-drawn "mask here too" box: masked from frame-span to frame+span and
-    used as a SAM 2 prompt on its own frame."""
+    """User-drawn "mask here too" box: masked on frames first..last (inclusive)
+    and used as a SAM 2 prompt on its own frame."""
     frame: int
     box: np.ndarray
-    span: int = 15
+    first: int
+    last: int
+
+
+def next_blurred_frame(levels: np.ndarray, frame: int) -> int | None:
+    """Where blurring starts again after `frame`: the first blurred frame
+    (levels > 0) after the unblurred run that `frame` is in, or that follows
+    it when `frame` itself is blurred. None if nothing is blurred later."""
+    lv = np.asarray(levels)
+    g = frame
+    while g < len(lv) and lv[g] > 0:  # skip the blurred run we are in
+        g += 1
+    later = np.nonzero(lv[g:] > 0)[0]
+    return int(g + later[0]) if len(later) else None
 
 
 def plan_labeled(dets: Detections, det_label: np.ndarray, person: int, fps: float = 30.0,
@@ -244,7 +257,7 @@ def plan_labeled(dets: Detections, det_label: np.ndarray, person: int, fps: floa
     # manual "mask here too" boxes: masked over their span, SAM 2 prompt on their frame
     for mb in manual or []:
         b = np.asarray(mb.box, np.float32)
-        for g in range(max(0, mb.frame - mb.span), min(n, mb.frame + mb.span + 1)):
+        for g in range(max(0, mb.first), min(n, mb.last + 1)):
             boxes[g].append(b)
             if not source[g] or source[g] == "hold":
                 source[g] = "manual"

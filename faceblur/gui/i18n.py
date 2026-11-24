@@ -58,7 +58,8 @@ HELP_EN = (
     "(bright = face detected, dim = bridged gap or drawn area).\n\n"
     "4. Fix mistakes on the video:\n"
     "   • click a box → blur that face or not, or 'Don't blur here' for one frame or track\n"
-    "   • drag a rectangle → 'Blur this area' (SAM 2 tracks it from there)\n\n"
+    "   • drag a rectangle → choose how many seconds to blur it from this frame on "
+    "('Until the next blurred part' closes a gap in the red band; SAM 2 tracks it from there)\n\n"
     "5. Render. A safety check then looks for any blurred face that is still recognizable; "
     "flagged frames are listed and marked red on the timeline.\n\n"
     "Keys: Space play/pause, ←/→ frame, Shift+←/→ one second, Home/End.\n"
@@ -114,8 +115,6 @@ _RU = {
     "Strength": "Сила",
     "Margin": "Отступ",
     "Corrections": "Исправления",
-    "Drawn box covers ±": "Нарисованная рамка действует ±",
-    " frames": " кадр.",
     "Remove selected correction": "Удалить выбранное исправление",
     "Processing": "Обработка",
     "Device": "Устройство",
@@ -234,14 +233,20 @@ _RU = {
     "whole track": "весь трек",
     "this frame": "только этот кадр",
     "✕  {time} (frame {frame}): not masked, {what}": "✕  {time} (кадр {frame}): не размывать, {what}",
-    "▢  {time} (frame {frame}): blurred area, ±{span} frames": "▢  {time} (кадр {frame}): размытая область, ±{span} кадр.",
+    "▢  {start} → {end} (frame {frame}): blurred area, {secs} s":
+        "▢  {start} → {end} (кадр {frame}): размытая область, {secs} с",
+    "Double-click to go there. Right-click a drawn area to change its duration.":
+        "Двойной щелчок — перейти туда. Правый щелчок по нарисованной области — изменить длительность.",
     "still recognizable {s}": "всё ещё узнаваемо {s}",
     "{tag} not blurred here": "{tag} здесь не размывается",
     "{tag} blur": "{tag} размыть",
     "blur (nearby)": "размыть (рядом)",
     "blur (bridged)": "размыть (заполнено)",
     "blur (drawn)": "размыть (нарисовано)",
-    "Drawn area, frame {frame} ±{span}": "Нарисованная область, кадр {frame} ±{span}",
+    "Drawn area, {start} → {end}": "Нарисованная область, {start} → {end}",
+    "Change duration…": "Изменить длительность…",
+    "Change duration": "Изменить длительность",
+    "new area": "новая область",
     "Remove this drawn area": "Удалить эту область",
     "Blur this face here again": "Снова размывать это лицо здесь",
     "Blur face #{num}": "Размыть лицо #{num}",
@@ -250,8 +255,15 @@ _RU = {
     "Don't blur here — this frame only": "Не размывать здесь — только этот кадр",
     "Don't blur here — while followed continuously": "Не размывать здесь — пока лицо непрерывно отслеживается",
     "Every frame where this face is followed continuously": "Все кадры, где это лицо непрерывно отслеживается",
-    "Blur this face here too (±{n} frames)": "Размыть и здесь (±{n} кадр.)",
-    "Blur this area (±{n} frames)": "Размыть эту область (±{n} кадр.)",
+    "Blur this face from here…": "Размыть это лицо отсюда…",
+    "Blur this area": "Размыть эту область",
+    "Blur for": "Размывать",
+    " s": " с",
+    "Until the next blurred part": "До следующей размытой части",
+    "Up to {time} (frame {f}), where the blur starts again": "До {time} (кадр {f}), где размытие начинается снова",
+    "Nothing is blurred later in the video": "Дальше в видео ничего не размывается",
+    "Until the end of the video": "До конца видео",
+    "{frames}: {start} → {end} (frames {a}–{b})": "{frames}: {start} → {end} (кадры {a}–{b})",
 
     # ---- render / safety
     "Nothing to blur": "Нечего размывать",
@@ -385,7 +397,8 @@ _RU = {
         "(ярко — лицо найдено, тускло — заполненный пропуск или нарисованная область).\n\n"
         "4. Исправляйте ошибки прямо на видео:\n"
         "   • щелчок по рамке → размыть это лицо или нет, либо «Не размывать здесь» для кадра или трека\n"
-        "   • протяните прямоугольник → «Размыть эту область» (дальше её отслеживает SAM 2)\n\n"
+        "   • протяните прямоугольник → выберите, сколько секунд размывать его начиная с этого кадра "
+        "(«До следующей размытой части» закрывает пропуск в красной полосе; дальше её отслеживает SAM 2)\n\n"
         "5. Рендер. Затем проверка безопасности ищет размытые лица, которые всё ещё можно узнать; "
         "такие кадры выводятся списком и отмечаются красным на шкале.\n\n"
         "Клавиши: Пробел — воспроизведение/пауза, ←/→ — кадр, Shift+←/→ — секунда, Home/End.\n"

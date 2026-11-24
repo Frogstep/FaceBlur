@@ -277,7 +277,7 @@ class Analysis:
             out.append(PersonInput(t, name, person_refs(self.dets, idx), idx, [], list(chain)))
         # each drawn box is its own track: it is a SAM 2 prompt of its own
         for m in project.manual:
-            box = ManualBox(m.frame, np.array(m.box, np.float32), m.span)
+            box = ManualBox(m.frame, np.array(m.box, np.float32), m.first, m.last)
             out.append(PersonInput(len(out), f"drawn box (frame {m.frame})", None, np.zeros(0, np.int64), [box]))
         return out, det_label
 
@@ -295,7 +295,7 @@ class Analysis:
             cache = self._plan_cache = {}
         plans = []
         for p in inputs:
-            key = (tuple(p.cards), tuple((m.frame, tuple(m.box.tolist()), m.span) for m in p.manual), ex_key)
+            key = (tuple(p.cards), tuple((m.frame, tuple(m.box.tolist()), m.first, m.last) for m in p.manual), ex_key)
             plan = cache.get(key)
             if plan is None:
                 plan = plan_labeled(self.dets, det_label, p.index, self.info.fps_float,

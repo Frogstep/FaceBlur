@@ -20,7 +20,7 @@ from PySide6.QtGui import (QAction, QActionGroup, QColor, QIcon, QKeySequence, Q
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
                                QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
-                               QRadioButton, QScrollArea, QSpinBox, QSplitter, QTabWidget, QToolButton, QVBoxLayout,
+                               QRadioButton, QScrollArea, QSplitter, QTabWidget, QToolButton, QVBoxLayout,
                                QWidget)
 
 from .. import __version__
@@ -356,17 +356,13 @@ class MainWindow(QMainWindow):
         # corrections
         g = QGroupBox(tr("Corrections"))
         cv = QVBoxLayout(g)
-        row = QHBoxLayout()
-        row.addWidget(QLabel(tr("Drawn box covers ±")))
-        self.span_spin = QSpinBox(minimum=0, maximum=600, value=15)
-        self.span_spin.setSuffix(tr(" frames"))
-        row.addWidget(self.span_spin)
-        row.addStretch(1)
-        cv.addLayout(row)
         self.corr_list = QListWidget()
         self.corr_list.setMaximumHeight(90)
         self.corr_list.setMinimumHeight(48)
+        self.corr_list.setToolTip(tr("Double-click to go there. Right-click a drawn area to change its duration."))
         self.corr_list.itemDoubleClicked.connect(lambda it: self.seek(it.data(Qt.ItemDataRole.UserRole + 1)))
+        self.corr_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.corr_list.customContextMenuRequested.connect(self._correction_menu)
         cv.addWidget(self.corr_list)
         rm = QPushButton(tr("Remove selected correction"))
         rm.clicked.connect(self._remove_correction)
@@ -960,16 +956,26 @@ class MainWindow(QMainWindow):
         _, self.plans = self.analysis.plans(self.project)
         self.excluded = self.analysis.excluded(self.project)
         # one band for everything blurred: bright = face detected, dim = bridged or drawn
+        self.timeline.set_tracks([(BLUR_COLOR, self._blur_levels())] if self.plans else [])
+        self.show_frame()
+
+    def _blur_levels(self, without_manual: int | None = None) -> np.ndarray:
+        """The blur band per frame (2 = face detected, 1 = bridged or drawn,
+        0 = not blurred), optionally leaving out one drawn box."""
         n = self.analysis.dets.num_frames
         levels = np.zeros(n, np.int8)
-        for plan in self.plans:
+        skip = None  # drawn boxes are the last plans, one each, in project order
+        if without_manual is not None:
+            skip = len(self.plans) - len(self.project.manual) + without_manual
+        for k, plan in enumerate(self.plans):
+            if k == skip:
+                continue
             lv = getattr(plan, "_levels", None)  # plans are cached and reused, so is this
             if lv is None:
                 src = np.asarray(plan.source)
                 lv = plan._levels = np.where(src == "det", 2, (src != "").astype(np.int8)).astype(np.int8)
             np.maximum(levels, lv[:n], out=levels)
-        self.timeline.set_tracks([(BLUR_COLOR, levels)] if self.plans else [])
-        self.show_frame()
+        return levels
 
     def _refresh_corrections(self) -> None:
         self.corr_list.clear()
@@ -985,8 +991,9 @@ class MainWindow(QMainWindow):
             it.setForeground(KEEP_COLOR)
             self.corr_list.addItem(it)
         for k, m in enumerate(self.project.manual):
-            it = QListWidgetItem(tr("▢  {time} (frame {frame}): blurred area, ±{span} frames",
-                                    time=fmt_time(m.frame / fps), frame=m.frame, span=m.span))
+            it = QListWidgetItem(tr("▢  {start} → {end} (frame {frame}): blurred area, {secs} s",
+                                    start=fmt_time(m.first / fps), end=fmt_time((m.last + 1) / fps),
+                                    frame=m.frame, secs=f"{(m.last - m.first + 1) / fps:.1f}"))
             it.setData(Qt.ItemDataRole.UserRole, ("manual", k))
             it.setData(Qt.ItemDataRole.UserRole + 1, m.frame)
             it.setForeground(BLUR_COLOR)
@@ -1079,7 +1086,7 @@ class MainWindow(QMainWindow):
                     out.append(Overlay(tuple(float(v) for v in b), BLUR_COLOR, Qt.PenStyle.DashLine, 1.5,
                                        tr("blur (bridged)"), "bridge"))
         for k, m in enumerate(self.project.manual):
-            if abs(f - m.frame) <= m.span:
+            if m.first <= f <= m.last:
                 exact = f == m.frame
                 out.append(Overlay(tuple(m.box), BLUR_COLOR, Qt.PenStyle.DotLine, 2.5 if exact else 1.5,
                                    tr("blur (drawn)"), "manual", k))
@@ -1386,10 +1393,7 @@ class MainWindow(QMainWindow):
         self._stop_player()
         menu = QMenu(self)
         if kind == "manual":
-            m = self.project.manual[ref]
-            menu.addAction(tr("Drawn area, frame {frame} ±{span}", frame=m.frame, span=m.span)).setEnabled(False)
-            a = menu.addAction(tr("Remove this drawn area"))
-            a.triggered.connect(lambda: self._remove_manual(ref))
+            self._manual_menu(menu, ref)
             menu.exec(gpos)
             return
         i = ref
@@ -1421,7 +1425,7 @@ class MainWindow(QMainWindow):
                 a.setToolTip(tr("Every frame where this face is followed continuously"))
                 a.triggered.connect(lambda: self._exclude(self.frame, box, "track"))
         elif k < 0 or self.blurred[k]:
-            a = menu.addAction(tr("Blur this face here too (±{n} frames)", n=self.span_spin.value()))
+            a = menu.addAction(tr("Blur this face from here…"))
             a.triggered.connect(lambda: self._add_manual(box))
         menu.exec(gpos)
 
@@ -1429,10 +1433,53 @@ class MainWindow(QMainWindow):
         if self.project is None or self.task is not None:
             return
         self._stop_player()
+        self._add_manual(box)
+
+    def _manual_menu(self, menu: QMenu, k: int) -> None:
+        m = self.project.manual[k]
+        fps = self.info.fps_float
+        menu.addAction(tr("Drawn area, {start} → {end}", start=fmt_time(m.first / fps),
+                          end=fmt_time((m.last + 1) / fps))).setEnabled(False)
+        menu.addAction(tr("Change duration…")).triggered.connect(lambda: self._edit_manual(k))
+        menu.addAction(tr("Remove this drawn area")).triggered.connect(lambda: self._remove_manual(k))
+
+    def _correction_menu(self, pos) -> None:
+        it = self.corr_list.itemAt(pos)
+        if it is None or self.project is None or self.task is not None:
+            return
+        kind, k = it.data(Qt.ItemDataRole.UserRole)
+        if kind != "manual":
+            return
         menu = QMenu(self)
-        a = menu.addAction(tr("Blur this area (±{n} frames)", n=self.span_spin.value()))
-        a.triggered.connect(lambda: self._add_manual(box))
-        menu.exec(gpos)
+        self._manual_menu(menu, k)
+        menu.exec(self.corr_list.viewport().mapToGlobal(pos))
+
+    def _ask_duration(self, frame: int, frames: int, without_manual: int | None, title: str,
+                      box=None) -> int | None:
+        """The duration dialog: frames a drawn box on `frame` covers, or None
+        if cancelled. A new `box` stays visible on the video meanwhile."""
+        from .manual_dialog import DurationDialog
+
+        n = self.info.num_frames
+        if self.analysis is not None and self.plans:
+            levels = self._blur_levels(without_manual)
+        else:
+            levels = np.zeros(n, np.int8)
+        if box is not None:
+            shown = self._overlays(self.frame, False) if self.boxes_cb.isChecked() else []
+            self.view.set_overlays(shown + [Overlay(tuple(float(v) for v in box), QColor("#ffd400"),
+                                                    Qt.PenStyle.DashLine, 2.5, tr("new area"), "new")])
+        dlg = DurationDialog(self, frame, n, self.info.fps_float, levels, frames, self.timeline, fmt_time, title)
+        ok = bool(dlg.exec())
+        if box is not None and not ok:
+            self.show_frame()  # drop the pending box
+        return dlg.frames if ok else None
+
+    def _last_manual_seconds(self) -> float:
+        try:
+            return max(0.1, float(QSettings().value("manual_seconds", 1.0)))
+        except (TypeError, ValueError):
+            return 1.0
 
     def _exclude(self, frame: int, box, scope: str) -> None:
         self.project.exclusions.append(Exclusion(frame, [round(v, 1) for v in box], scope))
@@ -1453,7 +1500,25 @@ class MainWindow(QMainWindow):
         self._schedule_recompute()
 
     def _add_manual(self, box) -> None:
-        self.project.manual.append(Manual(self.frame, [round(float(v), 1) for v in box], 0, self.span_spin.value()))
+        fps = self.info.fps_float
+        frames = self._ask_duration(self.frame, max(1, round(self._last_manual_seconds() * fps)), None,
+                                    tr("Blur this area"), box)
+        if frames is None:
+            return
+        QSettings().setValue("manual_seconds", frames / fps)
+        self.project.manual.append(Manual(self.frame, [round(float(v), 1) for v in box], length=frames))
+        self._mark_dirty()
+        self._refresh_review()
+        self._schedule_recompute()
+
+    def _edit_manual(self, k: int) -> None:
+        m = self.project.manual[k]
+        # an older box (±span) becomes a forward-only one from its frame
+        frames = self._ask_duration(m.frame, m.last - m.frame + 1, k, tr("Change duration"))
+        if frames is None:
+            return
+        QSettings().setValue("manual_seconds", frames / self.info.fps_float)
+        m.span, m.length = None, frames
         self._mark_dirty()
         self._refresh_review()
         self._schedule_recompute()

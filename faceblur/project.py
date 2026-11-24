@@ -11,8 +11,9 @@ import json
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-VERSION = 4  # 2: face cards labeled by the user (replaces automatic face groups); 3: cut & crop;
-# 4: output format and quality level (cq became an optional override)
+VERSION = 5  # 2: face cards labeled by the user (replaces automatic face groups); 3: cut & crop;
+# 4: output format and quality level (cq became an optional override);
+# 5: drawn boxes reach forward only (`length`; older boxes keep their ±`span`)
 
 
 @dataclass
@@ -41,11 +42,30 @@ class Exclusion:
 
 @dataclass
 class Manual:
-    """'Blur this area': a user-drawn box, masked for span frames around its frame."""
+    """'Blur this area': a user-drawn box, masked from its frame forward for
+    `length` frames (its own frame included). Boxes from older projects reach
+    `span` frames before and after their frame instead."""
     frame: int
     box: list[float]
     person: int = 0  # older projects only (ignored)
-    span: int = 15  # frames before and after
+    span: int | None = None  # older projects only: frames before and after
+    length: int = 25  # frames masked, starting at `frame`
+
+    @property
+    def first(self) -> int:
+        return self.frame - self.span if self.span is not None else self.frame
+
+    @property
+    def last(self) -> int:
+        """The last masked frame (inclusive)."""
+        return self.frame + self.span if self.span is not None else self.frame + max(1, self.length) - 1
+
+
+def _manual(d: dict, version: int) -> Manual:
+    d = _known(Manual, d)
+    if version < 5:
+        d.setdefault("span", 15)  # the old default, before boxes went forward only
+    return Manual(**d)
 
 
 @dataclass
@@ -146,7 +166,7 @@ class Project:
             people=[Person(name=x["name"]) for x in d.get("people", [])],
             labels=[Label(**_known(Label, x)) for x in d.get("labels", [])],
             exclusions=[Exclusion(**_known(Exclusion, x)) for x in d.get("exclusions", [])],
-            manual=[Manual(**_known(Manual, x)) for x in d.get("manual", [])],
+            manual=[_manual(x, d.get("version", 1)) for x in d.get("manual", [])],
             settings=_settings(d.get("settings", {}), d.get("version", 1)),
             edit=Edit(**_known(Edit, d.get("edit", {}))),
             output=absolute(d["output"]) if d.get("output") else "",
