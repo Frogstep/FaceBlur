@@ -29,10 +29,17 @@ jobs:
 
       # FFmpeg, plus the system libraries PySide6 loads even with QT_QPA_PLATFORM=offscreen
       # (the GUI tests in test_cutlist.py)
+      # needrestart (on the runner image) restarts services after installing, and
+      # restarting the preinstalled php-fpm once hung until the job timed out:
+      # don't restart anything, and give up early if apt hangs anyway.
       - name: Install FFmpeg and Qt libraries
+        timeout-minutes: 8
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_SUSPEND: "1"
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg \
+          sudo -E apt-get update
+          sudo -E apt-get install -y --no-install-recommends ffmpeg \
             libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 libglib2.0-0t64
 
       # The tests need neither PyTorch nor SAM 2: the face scan and render are faked,
