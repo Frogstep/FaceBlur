@@ -54,6 +54,10 @@ if exist "%UV%" (
     call :get_uv
 )
 if not exist "%UV%" goto :fail
+rem uv, Python and FFmpeg are not code-signed, so Smart App Control or an App Control
+rem (Device Guard) policy refuses to run them: say so instead of failing halfway
+"%UV%" --version >nul 2>&1
+if errorlevel 1 goto :blocked
 
 rem ------------------------------------------------------------ Python + venv
 echo [2/5] Python 3.12 and virtual environment
@@ -148,6 +152,23 @@ if errorlevel 1 (
 )
 echo Visual C++ Runtime installed.
 exit /b 0
+
+:blocked
+echo.
+"%SystemRoot%\System32\reg.exe" query "HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy" /v VerifiedAndReputablePolicyState 2>nul | "%SystemRoot%\System32\findstr.exe" /e "0x1" >nul
+if errorlevel 1 (
+    echo Windows refused to run "%UV%".
+    echo An App Control ^(Device Guard^) policy on this PC blocks programs that are not
+    echo code-signed. FaceBlur's tools ^(uv, Python, FFmpeg^) are open source and not signed,
+    echo so FaceBlur can't be installed here unless the PC's administrator allows them.
+) else (
+    echo Smart App Control is on, and it blocks programs that are not code-signed.
+    echo FaceBlur's tools ^(uv, Python, FFmpeg^) are open source and not signed, so they
+    echo can't run while it is on. To install FaceBlur, turn it off in Windows Security:
+    echo App ^& browser control, Smart App Control settings, Off. Then run install.bat again.
+)
+pause
+exit /b 1
 
 :fail
 echo.

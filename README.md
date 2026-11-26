@@ -37,6 +37,11 @@ yourself). At the end it checks that everything works and tells you if the GPU c
 On Linux, it also prints the command to install any system libraries the app window needs.
 Running it again skips what is already done and continues unfinished downloads.
 
+FaceBlur's tools (Python, FFmpeg and the installer's helper) are open source and not
+code-signed. If Windows' **Smart App Control** is on, it blocks them and the installer says
+so. FaceBlur then needs Smart App Control turned off (Windows Security → App & browser
+control → Smart App Control settings).
+
 To uninstall, delete the folder.
 
 ## Quick start
