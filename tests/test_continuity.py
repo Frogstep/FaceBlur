@@ -84,6 +84,18 @@ def test_loose_box_around_a_small_face_is_kept():
     assert plan.source[25] == "det"
 
 
+def test_card_of_body_sized_boxes_blurs_the_face_inside():
+    # every box of the card is body-sized (no normal size to compare with);
+    # where a smaller face sits inside it, that face is blurred instead
+    body = [60, 60, 180, 210]
+    items = [(f, body, 0.4) for f in range(10)] + [(f, FACE, 0.5) for f in range(10)]
+    labels = [0] * 10 + [UNLABELED] * 10
+    plan = _plan(40, items, labels)
+    for f in range(10):
+        assert [list(b) for b in plan.boxes[f]] == [FACE]
+        assert plan.target_dets[f] == [10 + f]
+
+
 def test_adopted_boxes_do_not_extend_the_chain():
     # weak boxes every 25 frames walking away from the only real detection
     # at frame 0: only the first is within a second of it

@@ -161,9 +161,49 @@ def next_blurred_frame(levels: np.ndarray, frame: int) -> int | None:
     return int(g + later[0]) if len(later) else None
 
 
+def _contained_faces(dets: Detections, own: np.ndarray, skip: set[int], frame_index,
+                     min_area: float, factor: float = 3.0, inside: float = 0.8) -> dict[int, int]:
+    """Body-sized detections of a person that hold a smaller face: {own
+    detection: the face inside it}. The face scan sometimes finds a box over
+    two bodies with the real face in it; the face, not the box, is what to blur.
+    A detection counts when it is over `min_area` pixels and the other one is
+    `factor` times smaller and at least `inside` of it lies in the big box."""
+    out: dict[int, int] = {}
+    if min_area <= 0:
+        return out
+    own_set = set(int(i) for i in own)
+    for i in own:
+        i = int(i)
+        b = dets.box[i]
+        a = _area(b)
+        if i in skip or a <= min_area:
+            continue
+        best, best_score = None, -1.0
+        for j in frame_index[int(dets.frame[i])]:
+            j = int(j)
+            if j == i or j in skip:
+                continue
+            s = dets.box[j]
+            sa = _area(s)
+            if sa <= 0 or sa * factor > a:
+                continue
+            x1, y1 = max(s[0], b[0]), max(s[1], b[1])
+            x2, y2 = min(s[2], b[2]), min(s[3], b[3])
+            if max(0.0, x2 - x1) * max(0.0, y2 - y1) / sa >= inside and dets.score[j] > best_score:
+                best, best_score = j, float(dets.score[j])
+        if best is not None:
+            out[i] = -1 if best in own_set else best  # -1: the face is this person's anyway
+    return out
+
+
+def _area(b) -> float:
+    return float(max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1]))
+
+
 def _size_outliers(dets: Detections, idx: np.ndarray, excluded: set[int], window: int,
                    min_area: float = 0.0, factor: float = 2.5, min_count: int = 3,
-                   step: float = 1.25, step_gap: int = 10) -> set[int]:
+                   step: float = 1.25, step_gap: int = 10,
+                   use: dict[int, int] | None = None) -> set[int]:
     """Detections in idx far bigger than the face around them. The tracker
     sometimes ties a body-sized false detection (or a run of them) to a face's
     track, and the face's card then carries it.
@@ -173,13 +213,15 @@ def _size_outliers(dets: Detections, idx: np.ndarray, excluded: set[int], window
     (a looser box around a small face is kept: blurring a bit more is safe). It is cleared again when
     it grew smoothly from a normal neighbour (at most `step` times the area
     per frame between them, at most `step_gap` frames apart): a real face walking toward
-    the camera grows like that, a false box appears in one jump."""
-    idx = np.array([i for i in idx if int(i) not in excluded], np.int64)
+    the camera grows like that, a false box appears in one jump.
+    use: {detection: the detection whose box stands for it} (_contained_faces)."""
+    use = use or {}
+    idx = np.array([i for i in idx if int(i) not in excluded and use.get(int(i)) != -1], np.int64)
     if len(idx) < min_count:
         return set()
     idx = idx[np.argsort(dets.frame[idx], kind="stable")]
     fr = dets.frame[idx]
-    b = dets.box[idx]
+    b = dets.box[[use.get(int(i), int(i)) for i in idx]].reshape(-1, 4)
     area = np.maximum(0, b[:, 2] - b[:, 0]) * np.maximum(0, b[:, 3] - b[:, 1])
     lo = np.searchsorted(fr, fr - window, side="left")
     hi = np.searchsorted(fr, fr + window, side="right")
@@ -225,23 +267,28 @@ def plan_labeled(dets: Detections, det_label: np.ndarray, person: int, fps: floa
     max_gap = int(round(max_gap_s * fps))
     hold = int(round(hold_s * fps))
     min_area = 0.03 * frame_size[0] * frame_size[1] if frame_size else 0.0
-    outliers = _size_outliers(dets, np.nonzero(det_label == person)[0], excluded,
-                              int(round(3 * fps)), min_area=min_area)
-    for f, idx in enumerate(dets.by_frame()):
+    frame_index = dets.by_frame()
+    own = np.nonzero(det_label == person)[0]
+    not_faces = set(int(i) for i in np.nonzero(det_label == NOT_A_FACE)[0]) | set(excluded)
+    # a body-sized box of this person with a face in it stands for that face
+    use = _contained_faces(dets, own, not_faces, frame_index, min_area)
+    outliers = _size_outliers(dets, own, excluded, int(round(3 * fps)), min_area=min_area, use=use)
+    for f, idx in enumerate(frame_index):
         best = -1.0
         for i in idx:
             lab = int(det_label[i])
             if i in excluded:
                 others[f].append(dets.box[i])
-            elif i in outliers:
+            elif i in outliers or use.get(int(i)) == -1:
                 continue  # the tracker tied a body-sized box to this face: never masked
             elif lab == person:
-                boxes[f].append(dets.box[i])
-                target_dets[f].append(int(i))
+                j = use.get(int(i), int(i))
+                boxes[f].append(dets.box[j])
+                target_dets[f].append(j)
                 source[f] = "det"
-                if dets.score[i] >= 0.5 and dets.score[i] > best:  # SAM 2 prompt
-                    best = float(dets.score[i])
-                    strong[f] = dets.box[i]
+                if dets.score[j] >= 0.5 and dets.score[j] > best:  # SAM 2 prompt
+                    best = float(dets.score[j])
+                    strong[f] = dets.box[j]
             elif lab == UNLABELED:
                 candidates[f].append(int(i))
             elif lab != NOT_A_FACE:  # another person, or someone else
@@ -256,9 +303,6 @@ def plan_labeled(dets: Detections, det_label: np.ndarray, person: int, fps: floa
     # adopted weak box never becomes the reference for the next one, or a
     # chain of false detections (a body, a pillow) could walk on for seconds.
     # A weak box must also be about the face's size (half to twice its area).
-    def _area(b) -> float:
-        return float(max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1]))
-
     for order in (range(n), range(n - 1, -1, -1)):
         last_f, last_box = None, None
         for f in order:
