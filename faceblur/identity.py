@@ -209,21 +209,28 @@ def plan_labeled(dets: Detections, det_label: np.ndarray, person: int, fps: floa
 
     # spatial continuity: a weak unlabeled detection (dark, profile, blur)
     # where this person's face was within the last/next second is this person.
+    # Only the person's own detections count as "where the face was": an
+    # adopted weak box never becomes the reference for the next one, or a
+    # chain of false detections (a body, a pillow) could walk on for seconds.
+    # A weak box must also be about the face's size (half to twice its area).
+    def _area(b) -> float:
+        return float(max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1]))
+
     for order in (range(n), range(n - 1, -1, -1)):
         last_f, last_box = None, None
         for f in order:
-            if boxes[f]:
+            if source[f] == "det":
                 last_f, last_box = f, main_box(f)
                 continue
-            if last_f is None or abs(f - last_f) > max_gap:
+            if boxes[f] or last_f is None or abs(f - last_f) > max_gap:
                 continue
+            ref_area = _area(last_box)
             for i in candidates[f]:
-                if _box_iou(dets.box[i], last_box) > 0.3:
+                ratio = _area(dets.box[i]) / ref_area if ref_area > 0 else 0.0
+                if 0.5 <= ratio <= 2.0 and _box_iou(dets.box[i], last_box) > 0.3:
                     boxes[f].append(dets.box[i])
                     target_dets[f].append(i)
                     source[f] = "near"
-            if boxes[f]:
-                last_f, last_box = f, main_box(f)
 
     # gap bridging: interpolate across short gaps, hold briefly at the ends
     have = [f for f in range(n) if boxes[f]]
