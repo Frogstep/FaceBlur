@@ -299,7 +299,8 @@ class Analysis:
             plan = cache.get(key)
             if plan is None:
                 plan = plan_labeled(self.dets, det_label, p.index, self.info.fps_float,
-                                    excluded=excluded, manual=p.manual)
+                                    excluded=excluded, manual=p.manual,
+                                    frame_size=(self.info.width, self.info.height))
                 if len(cache) > 4000:
                     cache.clear()
                 cache[key] = plan

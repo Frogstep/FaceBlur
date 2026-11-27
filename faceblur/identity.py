@@ -161,9 +161,46 @@ def next_blurred_frame(levels: np.ndarray, frame: int) -> int | None:
     return int(g + later[0]) if len(later) else None
 
 
+def _size_outliers(dets: Detections, idx: np.ndarray, excluded: set[int], window: int,
+                   min_area: float = 0.0, factor: float = 2.5, min_count: int = 3,
+                   step: float = 1.25, step_gap: int = 10) -> set[int]:
+    """Detections in idx far bigger than the face around them. The tracker
+    sometimes ties a body-sized false detection (or a run of them) to a face's
+    track, and the face's card then carries it.
+
+    A detection is suspect when its area is over `factor` times the lower
+    quartile of idx's areas within `window` frames and over `min_area` pixels
+    (a looser box around a small face is kept: blurring a bit more is safe). It is cleared again when
+    it grew smoothly from a normal neighbour (at most `step` times the area
+    per frame between them, at most `step_gap` frames apart): a real face walking toward
+    the camera grows like that, a false box appears in one jump."""
+    idx = np.array([i for i in idx if int(i) not in excluded], np.int64)
+    if len(idx) < min_count:
+        return set()
+    idx = idx[np.argsort(dets.frame[idx], kind="stable")]
+    fr = dets.frame[idx]
+    b = dets.box[idx]
+    area = np.maximum(0, b[:, 2] - b[:, 0]) * np.maximum(0, b[:, 3] - b[:, 1])
+    lo = np.searchsorted(fr, fr - window, side="left")
+    hi = np.searchsorted(fr, fr + window, side="right")
+    suspect = np.zeros(len(idx), bool)
+    for k in range(len(idx)):
+        if hi[k] - lo[k] >= min_count:
+            suspect[k] = area[k] > max(min_area, factor * float(np.quantile(area[lo[k]:hi[k]], 0.25)))
+    for order in (range(1, len(idx)), range(len(idx) - 2, -1, -1)):
+        for k in order:
+            p = k - 1 if order.step == 1 else k + 1
+            gap = abs(int(fr[k]) - int(fr[p]))
+            if (suspect[k] and not suspect[p] and gap <= step_gap
+                    and area[k] <= step ** max(gap, 1) * max(area[p], 1e-6)):
+                suspect[k] = False
+    return {int(i) for i in idx[suspect]}
+
+
 def plan_labeled(dets: Detections, det_label: np.ndarray, person: int, fps: float = 30.0,
                  max_gap_s: float = 1.0, hold_s: float = 0.25, excluded: set[int] | None = None,
-                 manual: list[ManualBox] | None = None) -> TargetPlan:
+                 manual: list[ManualBox] | None = None,
+                 frame_size: tuple[int, int] | None = None) -> TargetPlan:
     """Decides, frame by frame, where to mask `person`, using only the user's labels.
 
     det_label: label per detection (review.py: person index, SOMEONE_ELSE,
@@ -172,7 +209,9 @@ def plan_labeled(dets: Detections, det_label: np.ndarray, person: int, fps: floa
     never masked for this person; weak unlabeled detections are masked only
     where this person's face was within the last/next second (continuity).
     excluded: detection indices the user marked "not this person" on a frame.
-    manual: user-drawn boxes."""
+    manual: user-drawn boxes.
+    frame_size: (width, height); a detection of this person is dropped as a
+    false body-sized box only when it covers over 3% of the frame."""
     from .review import NOT_A_FACE, UNLABELED
 
     n = dets.num_frames
@@ -183,12 +222,19 @@ def plan_labeled(dets: Detections, det_label: np.ndarray, person: int, fps: floa
     others: list[list[np.ndarray]] = [[] for _ in range(n)]
     target_dets: list[list[int]] = [[] for _ in range(n)]
     candidates: list[list[int]] = [[] for _ in range(n)]
+    max_gap = int(round(max_gap_s * fps))
+    hold = int(round(hold_s * fps))
+    min_area = 0.03 * frame_size[0] * frame_size[1] if frame_size else 0.0
+    outliers = _size_outliers(dets, np.nonzero(det_label == person)[0], excluded,
+                              int(round(3 * fps)), min_area=min_area)
     for f, idx in enumerate(dets.by_frame()):
         best = -1.0
         for i in idx:
             lab = int(det_label[i])
             if i in excluded:
                 others[f].append(dets.box[i])
+            elif i in outliers:
+                continue  # the tracker tied a body-sized box to this face: never masked
             elif lab == person:
                 boxes[f].append(dets.box[i])
                 target_dets[f].append(int(i))
@@ -200,9 +246,6 @@ def plan_labeled(dets: Detections, det_label: np.ndarray, person: int, fps: floa
                 candidates[f].append(int(i))
             elif lab != NOT_A_FACE:  # another person, or someone else
                 others[f].append(dets.box[i])
-
-    max_gap = int(round(max_gap_s * fps))
-    hold = int(round(hold_s * fps))
 
     def main_box(f):
         return strong[f] if strong[f] is not None else boxes[f][0]
@@ -254,8 +297,8 @@ def plan_labeled(dets: Detections, det_label: np.ndarray, person: int, fps: floa
                     boxes[f] = [box]
                     source[f] = "interp"
     have_set = set(f for f in range(n) if boxes[f])
-    for f in sorted(have_set):
-        for d in range(1, hold + 1):
+    for d in range(1, hold + 1):  # nearest first: a held frame copies the closest box
+        for f in sorted(have_set):
             for g in (f - d, f + d):
                 if 0 <= g < n and not boxes[g] and not blocked(g, main_box(f)):
                     boxes[g] = [main_box(f)]
